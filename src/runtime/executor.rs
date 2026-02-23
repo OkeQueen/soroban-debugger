@@ -5,6 +5,7 @@ use crate::{DebuggerError, Result};
 use crate::inspector::budget::{MemorySummary, MemoryTracker};
 
 use indicatif::{ProgressBar, ProgressStyle};
+use serde_json::{json, Value};
 use soroban_env_host::xdr::ScVal;
 use soroban_env_host::{DiagnosticLevel, Host, TryFromVal};
 use soroban_sdk::testutils::Address as _;
@@ -452,6 +453,11 @@ impl ContractExecutor {
     }
 
     fn parse_args(&self, function: &str, args_json: &str) -> Result<Vec<Val>> {
+        let normalized_args_json = self
+            .normalize_args_for_function_signature(function, args_json)
+            .unwrap_or_else(|| args_json.to_string());
+
+        let parser = ArgumentParser::new(self.env.clone());
         let parser = ArgumentParser::new(self.env.clone());
         let normalized_args_json = self.normalize_args_for_function(function, args_json)?;
 
@@ -463,6 +469,26 @@ impl ContractExecutor {
             })
     }
 
+    fn normalize_args_for_function_signature(
+        &self,
+        function: &str,
+        args_json: &str,
+    ) -> Option<String> {
+        let signatures = crate::utils::wasm::parse_function_signatures(&self.wasm_bytes).ok()?;
+        let signature = signatures.into_iter().find(|s| s.name == function)?;
+
+        let Value::Array(mut args) = serde_json::from_str::<Value>(args_json).ok()? else {
+            return None;
+        };
+
+        for (idx, arg) in args.iter_mut().enumerate() {
+            let Some(param) = signature.params.get(idx) else {
+                break;
+            };
+
+            if param.type_name.starts_with("Option<") {
+                let original = arg.clone();
+                *arg = json!({ "type": "option", "value": original });
     fn normalize_args_for_function(&self, function: &str, args_json: &str) -> Result<String> {
         let signatures = crate::utils::wasm::parse_function_signatures(&self.wasm_bytes)?;
         let Some(signature) = signatures.into_iter().find(|sig| sig.name == function) else {
@@ -487,6 +513,13 @@ impl ContractExecutor {
             }
 
             if param.type_name.starts_with("Tuple<") {
+                let original = arg.clone();
+                let arity = tuple_arity_from_type_name(&param.type_name)?;
+                *arg = json!({ "type": "tuple", "arity": arity, "value": original });
+            }
+        }
+
+        serde_json::to_string(&args).ok()
                 let arity = tuple_arity_from_type_name(&param.type_name).ok_or_else(|| {
                     DebuggerError::InvalidArguments(format!(
                         "Invalid tuple type in function spec for '{}': {}",
@@ -567,6 +600,11 @@ impl ContractExecutor {
 }
 
 fn tuple_arity_from_type_name(type_name: &str) -> Option<usize> {
+    if !type_name.starts_with("Tuple<") || !type_name.ends_with('>') {
+        return None;
+    }
+
+    let inner = &type_name[6..type_name.len() - 1];
     let inner = type_name.strip_prefix("Tuple<")?.strip_suffix('>')?;
     if inner.trim().is_empty() {
         return Some(0);
@@ -609,6 +647,23 @@ mod tests {
     use super::tuple_arity_from_type_name;
 
     #[test]
+    fn parses_tuple_arity_for_simple_tuple() {
+        assert_eq!(tuple_arity_from_type_name("Tuple<U32, Symbol>"), Some(2));
+    }
+
+    #[test]
+    fn parses_tuple_arity_for_nested_tuple_types() {
+        assert_eq!(
+            tuple_arity_from_type_name("Tuple<Option<U32>, Tuple<I32, Symbol>, Vec<Bool>>"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn rejects_non_tuple_type_name() {
+        assert_eq!(tuple_arity_from_type_name("Option<U32>"), None);
+    }
+}
     fn tuple_arity_counts_top_level_types() {
         assert_eq!(tuple_arity_from_type_name("Tuple<U32, Symbol>"), Some(2));
         assert_eq!(
