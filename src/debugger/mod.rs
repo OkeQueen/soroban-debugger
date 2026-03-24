@@ -2,8 +2,10 @@ pub mod breakpoint;
 pub mod engine;
 pub mod error_db;
 pub mod instruction_pointer;
+pub mod source_map;
 pub mod state;
 pub mod stepper;
+pub mod timeline;
 
 pub use breakpoint::BreakpointManager;
 pub use engine::DebuggerEngine;
