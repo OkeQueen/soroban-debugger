@@ -170,6 +170,47 @@ Use the following keyboard shortcuts:
 - **F5** or **Continue**: Resume execution until the next breakpoint
 - **Shift+F5** or **Stop**: Terminate the debugging session
 
+## Feature Limitations
+
+The VS Code extension exposes a focused subset of the full `soroban-debug` CLI.
+The following features are **not available** in the extension.
+
+### Not supported in the extension
+
+| CLI feature | CLI flag | Workaround |
+|---|---|---|
+| Instruction-level stepping | `--instruction-debug`, `--step-instructions`, `--step-mode [block]` | Use `soroban-debug interactive --instruction-debug` in a terminal |
+| Storage key filtering | `--storage-filter <pattern>` | All storage is shown unfiltered in the Variables panel; filter via CLI |
+| Auth tree display | `--show-auth` | Use `soroban-debug run --show-auth` in a terminal |
+| Batch execution | `--batch-args <file>`, `--repeat N` | Use `soroban-debug run --batch-args` in a terminal |
+| Remote client mode | `soroban-debug remote --remote host:port` | Use CLI; see [Remote Debugging](../../docs/remote-debugging.md) |
+| TLS configuration | `--tls-cert`, `--tls-key` | Use CLI server/remote commands directly |
+| Storage export | `--export-storage <file>` | Use `soroban-debug run --export-storage` in a terminal |
+| Storage import | `--import-storage <file>` | Use `snapshotPath` in `launch.json` for initial state |
+| Event display and filtering | `--show-events`, `--event-filter` | Use `soroban-debug run --show-events` in a terminal |
+| Dry-run mode | `--dry-run` | Use `soroban-debug run --dry-run` in a terminal |
+| Cross-contract mocking | `--mock CONTRACT.fn=value` | Use `soroban-debug run --mock` in a terminal |
+| Conditional breakpoints | (not in CLI either) | Not supported on either surface |
+| Hit-count conditions | (not in CLI either) | Not supported on either surface |
+| Log points | (not in CLI either) | Not supported on either surface |
+| Analysis subcommands | `analyze`, `symbolic`, `optimize`, `profile`, `compare`, `replay`, `upgrade-check`, `scenario` | Use CLI subcommands directly |
+
+### Supported in the extension
+
+| Feature | Details |
+|---|---|
+| Step in / over / out | F11, F10, Shift+F11 |
+| Continue | F5 |
+| Breakpoints | Set by clicking source line; resolves to the enclosing exported function boundary |
+| Variable inspection — storage | Shown in the Variables panel (Storage scope) when paused |
+| Variable inspection — arguments | Shown in the Variables panel (Arguments scope) when paused |
+| Call stack | Up to 50 frames, clickable to navigate to frame source |
+| Expression evaluation | Debug Console when paused; hover evaluation over identifiers |
+
+For the full feature comparison, see [docs/feature-matrix.md](../../docs/feature-matrix.md).
+
+---
+
 ## Advanced Configuration
 
 ### Timeouts
