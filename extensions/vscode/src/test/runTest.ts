@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   });
   assert.equal(badArgs.ok, false, 'Expected non-serializable args to fail preflight');
   assert.equal(badArgs.issues[0].field, 'args');
-  assert.match(badArgs.issues[0].message, /\$\.0\.nested/);
+  assert.match(badArgs.issues[0].message, /\$\[0\]\.nested/);
 
   const badPort = await validateLaunchConfig({
     binaryPath: preflightBinaryPath,

@@ -1,4 +1,3 @@
-import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -28,19 +27,48 @@ export interface LogEntry {
   correlationId?: string;
 }
 
+type OutputChannelLike = {
+  appendLine: (msg: string) => void;
+  dispose: () => void;
+};
+
+type StorageUriLike = {
+  fsPath: string;
+};
+
+type ExtensionContextLike = {
+  globalStorageUri: StorageUriLike;
+};
+
+type VscodeModuleLike = {
+  window?: {
+    createOutputChannel: (name: string) => OutputChannelLike;
+  };
+};
+
+function loadVscodeModule(): VscodeModuleLike | undefined {
+  try {
+    return require('vscode') as VscodeModuleLike;
+  } catch {
+    return undefined;
+  }
+}
+
 export class LogManager {
-  private outputChannel: vscode.OutputChannel;
+  private outputChannel: OutputChannelLike;
   private logFile: string;
   private maxLogSizeBytes = 10 * 1024 * 1024; // 10MB
 
-  constructor(context: vscode.ExtensionContext) {
-    if (typeof vscode !== 'undefined' && vscode.window) {
+  constructor(context: ExtensionContextLike) {
+    const vscode = loadVscodeModule();
+
+    if (vscode?.window) {
       this.outputChannel = vscode.window.createOutputChannel('Soroban Debugger');
     } else {
       this.outputChannel = {
         appendLine: (msg: string) => console.log(msg),
         dispose: () => {}
-      } as any;
+      };
     }
     this.logFile = path.join(context.globalStorageUri.fsPath, 'debug.log');
     this.ensureLogDirectory();
