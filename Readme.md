@@ -804,7 +804,7 @@ Example output:
 }
 ```
 
-Default output mode remains pretty, human-readable output:
+Default output mode remains pretty, human-readable output
 
 ```bash
 soroban-debug run --contract <path/to/contract.wasm> --function <fn>
