@@ -106,6 +106,7 @@ impl SourceMap {
                     if let Some(file_path) =
                         self.get_file_path(&dwarf, &unit, header, row.file_index())
                     {
+                        // In WASM, DWARF addresses are usually offsets into the code section
                         let offset =
                             self.normalize_wasm_offset(row.address() as usize, wasm_bytes.len());
                         let line = row.line().map(|l| l.get() as u32).unwrap_or(0);
@@ -601,3 +602,4 @@ fn paths_match_normalized(a: &str, b: &str) -> bool {
     let b_file = b.rsplit('/').next().unwrap_or(b);
     a_file == b_file
 }
+

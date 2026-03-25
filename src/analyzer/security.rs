@@ -736,6 +736,12 @@ fn is_storage_read_import(module: &str, name: &str) -> bool {
         if n == *base {
             return true;
         }
+        // Handle prefix-qualified names like "contract_storage_get" or "soroban_storage_has"
+        if n.ends_with(base) {
+            return true;
+        }
+        if n.starts_with(base) {
+            let suffix = &n[base.len()..];
         if let Some(suffix) = n.strip_prefix(base) {
             if suffix.is_empty() {
                 return true;
