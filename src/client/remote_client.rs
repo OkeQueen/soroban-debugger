@@ -274,7 +274,7 @@ impl RemoteClient {
     }
 
     /// Set a breakpoint
-    pub fn set_breakpoint(&mut self, function: &str, condition: Option<String>) -> Result<()> {
+    pub fn set_breakpoint(&mut self, function: &str, _condition: Option<String>) -> Result<()> {
         let response = self.send_request(DebugRequest::SetBreakpoint {
             id: function.to_string(),
             function: function.to_string(),
@@ -320,9 +320,10 @@ impl RemoteClient {
         let response = self.send_request(DebugRequest::ListBreakpoints)?;
 
         match response {
-            DebugResponse::BreakpointsList { breakpoints } => {
-                Ok(breakpoints.into_iter().map(|breakpoint| breakpoint.function).collect())
-            }
+            DebugResponse::BreakpointsList { breakpoints } => Ok(breakpoints
+                .into_iter()
+                .map(|breakpoint| breakpoint.function)
+                .collect()),
             DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
             _ => Err(DebuggerError::ExecutionError(
                 "Unexpected response to ListBreakpoints".to_string(),
@@ -438,7 +439,7 @@ impl RemoteClient {
 }
 
 fn parse_response_line(expected_id: u64, response_line: &str) -> Result<DebugResponse> {
-    let response_message: DebugMessage = serde_json::from_str(response_line)
+    let response_message = DebugMessage::parse(response_line)
         .map_err(|e| DebuggerError::FileError(format!("Failed to parse response: {}", e)))?;
 
     if response_message.id != expected_id {
@@ -449,9 +450,18 @@ fn parse_response_line(expected_id: u64, response_line: &str) -> Result<DebugRes
         .into());
     }
 
-    response_message.response.ok_or_else(|| {
-        DebuggerError::FileError("Response message has no response field".to_string()).into()
-    })
+    let response = response_message.response.ok_or_else(|| {
+        DebuggerError::FileError("Response message has no response field".to_string())
+    })?;
+
+    if matches!(response, DebugResponse::Unknown) {
+        return Err(DebuggerError::ExecutionError(
+            "Received unknown response type from server. Try upgrading the client.".to_string(),
+        )
+        .into());
+    }
+
+    Ok(response)
 }
 
 fn sanitize_auth_message(message: &str, token: &str) -> String {
@@ -472,6 +482,10 @@ impl Drop for RemoteClient {
 mod tests {
     use super::*;
     use crate::server::protocol::DebugResponse;
+    use std::io::{BufRead, BufReader, ErrorKind, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn parse_response_line_rejects_mismatched_ids() {
@@ -493,6 +507,70 @@ mod tests {
     fn connect_failure_is_network_error_category() {
         let err = RemoteClient::connect("127.0.0.1:1", None).unwrap_err();
         assert!(err.to_string().contains("Network/transport error"));
+    }
+
+    #[test]
+    fn reuses_buffered_stream_across_rapid_requests() {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return,
+            Err(err) => panic!("bind test listener: {err}"),
+        };
+        let addr = listener.local_addr().expect("listener address");
+
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("set read timeout");
+
+            let read_stream = stream.try_clone().expect("clone stream for reader");
+            let mut reader = BufReader::new(read_stream);
+            let mut writer = stream;
+
+            for id in 1..=7 {
+                let mut request_line = String::new();
+                let bytes_read = reader.read_line(&mut request_line).expect("read request");
+                assert!(bytes_read > 0, "client closed before request {id}");
+
+                let request: DebugMessage =
+                    serde_json::from_str(&request_line).expect("parse request");
+                assert_eq!(request.id, id);
+
+                let response = match request.request.expect("request payload") {
+                    DebugRequest::Handshake { .. } => DebugMessage::response(
+                        request.id,
+                        DebugResponse::HandshakeAck {
+                            selected_version: PROTOCOL_MAX_VERSION,
+                            server_name: "test-server".to_string(),
+                            server_version: "0.0.0".to_string(),
+                            protocol_min: PROTOCOL_MIN_VERSION,
+                            protocol_max: PROTOCOL_MAX_VERSION,
+                        },
+                    ),
+                    DebugRequest::Ping => DebugMessage::response(request.id, DebugResponse::Pong),
+                    DebugRequest::Disconnect => {
+                        DebugMessage::response(request.id, DebugResponse::Disconnected)
+                    }
+                    other => panic!("unexpected request: {other:?}"),
+                };
+
+                let response_json = serde_json::to_string(&response).expect("serialize response");
+                writer
+                    .write_all(format!("{response_json}\n").as_bytes())
+                    .expect("write response");
+                writer.flush().expect("flush response");
+            }
+        });
+
+        let mut client = RemoteClient::connect(&addr.to_string(), None).expect("connect client");
+
+        for _ in 0..5 {
+            client.ping().expect("ping over persistent stream");
+        }
+
+        client.disconnect().expect("disconnect client");
+        server.join().expect("server thread");
     }
 
     #[test]

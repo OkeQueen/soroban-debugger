@@ -48,6 +48,14 @@ pub enum GraphFormat {
     Mermaid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum SymbolicProfile {
+    Fast,
+    #[default]
+    Balanced,
+    Deep,
+}
+
 impl Verbosity {
     /// Convert verbosity to log level string for RUST_LOG
     pub fn to_log_level(self) -> String {
@@ -98,6 +106,18 @@ pub struct Cli {
     /// Filter budget trend by function name
     #[arg(long)]
     pub trend_function: Option<String>,
+
+    /// Regression threshold percentage for `--budget-trend` warnings
+    #[arg(long, default_value_t = 10.0, value_name = "PCT", value_parser = clap::value_parser!(f64).range(0.0..))]
+    pub trend_regression_threshold_pct: f64,
+
+    /// Lookback window (number of runs) for `--budget-trend` regression detection
+    #[arg(long, default_value_t = 2, value_name = "N", value_parser = clap::value_parser!(usize).range(2..))]
+    pub trend_regression_lookback: usize,
+
+    /// Smoothing window (moving average) for `--budget-trend` regression detection (1 disables smoothing)
+    #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(usize).range(1..))]
+    pub trend_regression_smoothing: usize,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -592,7 +612,7 @@ pub struct OptimizeArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, OutputFormat};
+    use super::{Cli, Commands, OutputFormat, SymbolicProfile};
     use clap::Parser;
 
     #[test]
@@ -697,6 +717,56 @@ mod tests {
         assert!(args.contract.is_none());
         assert!(args.function.is_none());
     }
+
+    #[test]
+    fn symbolic_defaults_to_balanced_profile() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.profile, SymbolicProfile::Balanced);
+        assert_eq!(args.input_combination_cap, None);
+        assert_eq!(args.path_cap, None);
+        assert_eq!(args.timeout, None);
+    }
+
+    #[test]
+    fn symbolic_accepts_explicit_caps_and_profile() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--profile",
+            "deep",
+            "--input-combination-cap",
+            "512",
+            "--path-cap",
+            "200",
+            "--timeout",
+            "45",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.profile, SymbolicProfile::Deep);
+        assert_eq!(args.input_combination_cap, Some(512));
+        assert_eq!(args.path_cap, Some(200));
+        assert_eq!(args.timeout, Some(45));
+    }
 }
 
 #[derive(Parser)]
@@ -785,6 +855,22 @@ pub struct SymbolicArgs {
     /// Output file for the scenario TOML
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Preset symbolic exploration budget profile
+    #[arg(long, value_enum, default_value_t = SymbolicProfile::Balanced)]
+    pub profile: SymbolicProfile,
+
+    /// Maximum number of input combinations to generate deterministically
+    #[arg(long, value_name = "N")]
+    pub input_combination_cap: Option<usize>,
+
+    /// Maximum number of generated inputs to execute
+    #[arg(long, value_name = "N")]
+    pub path_cap: Option<usize>,
+
+    /// Overall symbolic analysis timeout in seconds
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
 }
 
 #[derive(Parser)]

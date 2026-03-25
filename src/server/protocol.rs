@@ -94,14 +94,8 @@ pub struct DynamicTraceEvent {
     pub message: String,
     pub caller: Option<String>,
     pub function: Option<String>,
-    pub call_depth: Option<usize>,
     pub storage_key: Option<String>,
     pub storage_value: Option<String>,
-    /// Call-frame depth at the time this event was emitted (0 = top-level).
-    /// Used by reentrancy analysis to correlate writes with the frame that
-    /// issued the cross-contract call.
-    #[serde(default)]
-    pub call_depth: u32,
 }
 
 /// Source location information (file, line, column)
@@ -219,6 +213,10 @@ pub enum DebugRequest {
 
     /// Disconnect
     Disconnect,
+
+    /// Catch-all for forward compatibility
+    #[serde(other)]
+    Unknown,
 }
 
 /// Response messages from the server
@@ -313,12 +311,12 @@ pub enum DebugResponse {
     BreakpointCleared { id: String },
 
     /// List of breakpoints
-    BreakpointsList { breakpoints: Vec<BreakpointDescriptor> },
+    BreakpointsList {
+        breakpoints: Vec<BreakpointDescriptor>,
+    },
 
     /// Backend capabilities
-    Capabilities {
-        breakpoints: BreakpointCapabilities,
-    },
+    Capabilities { breakpoints: BreakpointCapabilities },
 
     /// Snapshot loaded
     SnapshotLoaded { summary: String },
@@ -338,6 +336,10 @@ pub enum DebugResponse {
 
     /// Disconnected
     Disconnected,
+
+    /// Catch-all for forward compatibility
+    #[serde(other)]
+    Unknown,
 }
 
 /// Message wrapper for the protocol
@@ -368,6 +370,14 @@ impl DebugMessage {
 
     pub fn is_response_for(&self, expected_id: u64) -> bool {
         self.id == expected_id && self.response.is_some()
+    }
+
+    /// Parse a JSON string into a DebugMessage with field-aware error reporting.
+    pub fn parse(json: &str) -> std::result::Result<Self, String> {
+        let deserializer = &mut serde_json::Deserializer::from_str(json);
+        serde_path_to_error::deserialize(deserializer).map_err(|e| {
+            format!("Protocol error at '{}': {}", e.path(), e.inner())
+        })
     }
 }
 
@@ -410,5 +420,64 @@ mod tests {
             ProtocolNegotiationError::InvalidClientRange { .. }
         ));
         assert!(err.to_string().contains("Invalid client protocol range"));
+    }
+
+    #[test]
+    fn test_tolerate_unknown_fields_in_struct() {
+        let json = r#"{
+            "id": 1,
+            "request": {
+                "type": "Handshake",
+                "client_name": "test",
+                "client_version": "1.0",
+                "protocol_min": 1,
+                "protocol_max": 2,
+                "unknown_field": "ignore me"
+            }
+        }"#;
+        let msg = DebugMessage::parse(json).expect("Should tolerate unknown fields");
+        if let Some(DebugRequest::Handshake { client_name, .. }) = msg.request {
+            assert_eq!(client_name, "test");
+        } else {
+            panic!("Expected Handshake request");
+        }
+    }
+
+    #[test]
+    fn test_strict_required_fields() {
+        let json = r#"{
+            "id": 1,
+            "request": {
+                "type": "Handshake",
+                "client_name": "test"
+            }
+        }"#;
+        let err = DebugMessage::parse(json).unwrap_err();
+        assert!(err.contains("request.client_version"), "Error should mention missing field: {}", err);
+    }
+
+    #[test]
+    fn test_forward_compat_unknown_enum_variant() {
+        let json = r#"{
+            "id": 1,
+            "request": {
+                "type": "FutureRequestType",
+                "some_data": 42
+            }
+        }"#;
+        let msg = DebugMessage::parse(json).expect("Should tolerate unknown request type");
+        assert!(matches!(msg.request, Some(DebugRequest::Unknown)));
+    }
+
+    #[test]
+    fn test_dynamic_trace_event_unified_call_depth() {
+        let json = r#"{
+            "sequence": 1,
+            "kind": "FunctionCall",
+            "message": "test",
+            "call_depth": 5
+        }"#;
+        let event: DynamicTraceEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.call_depth, 5);
     }
 }

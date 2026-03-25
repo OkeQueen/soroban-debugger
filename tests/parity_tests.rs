@@ -4,7 +4,7 @@
 //! Each test is annotated with which surface(s) it validates:
 //!   - CLI: exercised via the soroban-debug binary directly
 //!   - DAP: exercised via the soroban-debug server TCP protocol
-//!       (the same path the VS Code extension uses internally)
+//!     (the same path the VS Code extension uses internally)
 //!
 //! Functional acceptance tests (flag is parsed without "unrecognized argument"
 //! error) use a temporary dummy WASM file so no built fixture is required.
@@ -394,17 +394,13 @@ fn parity_dap_server_rejects_invalid_token() {
         Ok(response) => {
             // The server must NOT indicate a successful authentication.
             assert!(
-                !response.contains("\"success\":true")
-                    || response.contains("\"success\":false"),
+                !response.contains("\"success\":true") || response.contains("\"success\":false"),
                 "Server should reject an incorrect token, got: {}",
                 response
             );
         }
         Err(e) => {
-            eprintln!(
-                "Skipping parity_dap_server_rejects_invalid_token: {}",
-                e
-            );
+            eprintln!("Skipping parity_dap_server_rejects_invalid_token: {}", e);
         }
     }
 }

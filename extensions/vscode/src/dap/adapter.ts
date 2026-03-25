@@ -6,41 +6,45 @@ import {
 import { DebugProtocol } from '@vscode/debugprotocol';
 import * as readline from 'readline';
 import { DebuggerProcess, DebuggerProcessConfig } from '../cli/debuggerProcess';
-import { BreakpointCapabilities, BreakpointLocation, DebuggerState, Variable } from './protocol';
+import { DebuggerState, Variable } from './protocol';
+import { VariableStore } from './variableStore';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
+import { LogManager, LogLevel as ManagerLogLevel, LogPhase } from '../debug/logManager';
 
 type LaunchRequestArgs = DebugProtocol.LaunchRequestArguments & DebuggerProcessConfig;
 
 export class SorobanDebugSession extends DebugSession {
+  private logManager: LogManager | undefined;
   private debuggerProcess: DebuggerProcess | null = null;
   private state: DebuggerState = {
     isRunning: false,
     isPaused: false,
     breakpoints: new Map(),
     callStack: [],
-    variables: []
+    storage: {}
   };
-  private variableHandles = new Map<number, any>();
-  private nextVarHandle = 1;
+  private variableStore = new VariableStore();
   private threadId = 1;
   private outputReaders: readline.Interface[] = [];
   private hasExecuted = false;
   private exportedFunctions = new Set<string>();
   private sourceFunctionBreakpoints = new Map<string, Set<string>>();
-  private backendCapabilities: BreakpointCapabilities = {
-    conditionalBreakpoints: true,
-    hitConditionalBreakpoints: true,
-    logPoints: true
-  };
+  private functionBreakpointRefCounts = new Map<string, number>();
+  private requestAbortControllers = new Map<number, AbortController>();
+  private refreshAbortController: AbortController | null = null;
+  private refreshGeneration = 0;
 
   protected initializeRequest(
     response: DebugProtocol.InitializeResponse,
     args: DebugProtocol.InitializeRequestArguments
   ): void {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `InitializeRequest: ${JSON.stringify(args)}`);
     response.body = response.body || {};
     response.body.supportsConfigurationDoneRequest = true;
     response.body.supportsEvaluateForHovers = true;
+    (response.body as any).supportsVariablePaging = true;
+    (response.body as any).supportsCancelRequest = true;
     response.body.supportsSetVariable = false;
     response.body.supportsSetExpression = false;
     response.body.supportsConditionalBreakpoints = true;
@@ -55,6 +59,7 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.LaunchResponse,
     args: LaunchRequestArgs
   ): Promise<void> {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `LaunchRequest: ${JSON.stringify(args)}`);
     try {
       const preflight = await validateLaunchConfig(args);
       if (!preflight.ok) {
@@ -73,14 +78,13 @@ export class SorobanDebugSession extends DebugSession {
         token: args.token,
         requestTimeoutMs: args.requestTimeoutMs,
         connectTimeoutMs: args.connectTimeoutMs
-      });
+      }, this.logManager);
 
       await this.debuggerProcess.start();
       this.state.isRunning = true;
       this.state.isPaused = false;
       this.hasExecuted = false;
-      this.variableHandles.clear();
-      this.nextVarHandle = 1;
+      this.variableStore.reset();
       this.exportedFunctions = await this.debuggerProcess.getContractFunctions();
       this.backendCapabilities = await this.debuggerProcess.getCapabilities().catch(() => ({
         conditionalBreakpoints: false,
@@ -102,7 +106,7 @@ export class SorobanDebugSession extends DebugSession {
     }
   }
 
-  protected async setBreakpointsRequest(
+  protected async setBreakPointsRequest(
     response: DebugProtocol.SetBreakpointsResponse,
     args: DebugProtocol.SetBreakpointsArguments
   ): Promise<void> {
@@ -205,22 +209,20 @@ export class SorobanDebugSession extends DebugSession {
     args: DebugProtocol.ScopesArguments
   ): Promise<void> {
     // Rebuild handles each time to reflect the latest paused state.
-    this.variableHandles.clear();
-    this.nextVarHandle = 1;
+    this.variableStore.reset();
 
     const scopes: DebugProtocol.Scope[] = [];
 
-    const argsRef = this.nextVarHandle++;
-    this.variableHandles.set(argsRef, this.argsToVariables(this.state.args));
+    const argsRef = this.variableStore.createListHandle(this.variableStore.variablesFromArgs(this.state.args));
     scopes.push({
       name: 'Arguments',
       variablesReference: argsRef,
       expensive: false
     });
 
-    if (this.state.variables && this.state.variables.length > 0) {
-      const variablesRef = this.nextVarHandle++;
-      this.variableHandles.set(variablesRef, this.state.variables);
+    const storageKeys = this.state.storage ? Object.keys(this.state.storage) : [];
+    if (storageKeys.length > 0) {
+      const variablesRef = this.variableStore.createListHandle(this.variableStore.variablesFromStorage(this.state.storage as Record<string, unknown>));
 
       scopes.push({
         name: 'Storage',
@@ -237,21 +239,26 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.VariablesResponse,
     args: DebugProtocol.VariablesArguments
   ): Promise<void> {
-    const variables = this.variableHandles.get(args.variablesReference) || [];
+    const variables = this.variableStore.getVariables(args.variablesReference, {
+      start: (args as any).start as number | undefined,
+      count: (args as any).count as number | undefined
+    });
 
     response.body = {
       variables: variables.map((v: Variable) => ({
         name: v.name,
         value: v.value,
         type: v.type,
-        variablesReference: v.variablesReference || 0
+        variablesReference: v.variablesReference || 0,
+        indexedVariables: v.indexedVariables,
+        namedVariables: v.namedVariables
       }))
     };
 
     this.sendResponse(response);
   }
 
-  protected async evaluateRequest(
+   protected async evaluateRequest(
     response: DebugProtocol.EvaluateResponse,
     args: DebugProtocol.EvaluateArguments
   ): Promise<void> {
@@ -262,6 +269,7 @@ export class SorobanDebugSession extends DebugSession {
         await this.refreshState();
       }
 
+      // 1. Check for "magic" variables (local overrides)
       if (expression === 'args' || expression === 'Arguments') {
         response.body = {
           result: this.state.args ?? '(none)',
@@ -297,7 +305,19 @@ export class SorobanDebugSession extends DebugSession {
         return;
       }
 
-      throw new Error('Unsupported expression. Try `args`, `storage`, or `storage.<key>`.');
+      // 2. Fall back to backend evaluation if available and paused
+      if (this.debuggerProcess && this.state.isPaused) {
+        const result = await this.debuggerProcess.evaluate(args.expression, args.frameId);
+        response.body = {
+          result: result.result,
+          type: result.type,
+          variablesReference: result.variablesReference
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      throw new Error('Unsupported expression or debugger not paused. Try `args`, `storage`, or `storage.<key>`.');
     } catch (error) {
       if (error instanceof DebuggerTimeoutError) {
         this.sendErrorResponse(response, {
@@ -373,25 +393,6 @@ export class SorobanDebugSession extends DebugSession {
     response: DebugProtocol.NextResponse,
     args: DebugProtocol.NextArguments
   ): Promise<void> {
-    if (!this.debuggerProcess) {
-      this.sendResponse(response);
-      return;
-    }
-
-    try {
-      const result = await this.debuggerProcess.sendCommand({
-        type: 'StepOverLine'
-      });
-      
-      this.sendResponse(response);
-
-      if (result && result.paused) {
-        this.state.isPaused = true;
-        this.sendEvent(new StoppedEvent('step', this.threadId));
-      }
-    } catch (e) {
-      this.sendResponse(response);
-    }
     await this.stepOnce(response, 'next');
   }
 
@@ -409,7 +410,7 @@ export class SorobanDebugSession extends DebugSession {
     await this.stepOnce(response, 'step out');
   }
 
-  protected async threadRequest(
+  protected async threadsRequest(
     response: DebugProtocol.ThreadsResponse
   ): Promise<void> {
     response.body = {
@@ -426,48 +427,15 @@ export class SorobanDebugSession extends DebugSession {
     args: DebugProtocol.ConfigurationDoneArguments
   ): Promise<void> {
     try {
-      if (this.debuggerProcess) {
-        await this.refreshState();
-        this.state.isPaused = true;
-        this.sendEvent(new StoppedEvent('entry', this.threadId));
-      }
-      this.sendResponse(response);
-    } catch (error) {
-      if (error instanceof DebuggerTimeoutError) {
-        this.sendEvent(new LogOutputEvent(
-          `[timeout] configurationDone refresh timed out (${error.requestType}).\n` +
-          `Next steps: restart the debug session.\n`,
-          LogLevel.Error
-        ));
-        this.sendEvent(new ExitedEvent(1));
-        await this.stop();
-        this.sendResponse(response);
-        return;
+      const requestSeq = (response as any).request_seq as number | undefined;
+      const controller = new AbortController();
+      if (typeof requestSeq === 'number') {
+        this.requestAbortControllers.set(requestSeq, controller);
       }
 
-      this.sendErrorResponse(response, {
-        id: 1009,
-        format: `Configuration failed: ${error}`,
-        showUser: true
+      const result = await this.debuggerProcess.evaluate(args.expression, args.frameId, {
+        signal: controller.signal
       });
-    }
-  }
-
-  protected async evaluateRequest(
-    response: DebugProtocol.EvaluateResponse,
-    args: DebugProtocol.EvaluateArguments
-  ): Promise<void> {
-    if (!this.debuggerProcess || !this.state.isPaused) {
-      this.sendErrorResponse(response, {
-        id: 1004,
-        format: 'Evaluation is only available when the debugger is paused',
-        showUser: true
-      });
-      return;
-    }
-
-    try {
-      const result = await this.debuggerProcess.evaluate(args.expression, args.frameId);
       response.body = {
         result: result.result,
         type: result.type,
@@ -475,18 +443,45 @@ export class SorobanDebugSession extends DebugSession {
       };
       this.sendResponse(response);
     } catch (error) {
+      if ((error as any)?.name === 'AbortError' || (error as any)?.name === 'TimeoutError') {
+        this.sendErrorResponse(response, {
+          id: 1006,
+          format: 'Evaluation canceled',
+          showUser: false
+        });
+        return;
+      }
       this.sendErrorResponse(response, {
-        id: 1005,
-        format: `${error}`,
-        showUser: false
+        id: 1009,
+        format: `Configuration failed: ${error}`,
+        showUser: true
       });
+    } finally {
+      const requestSeq = (response as any).request_seq as number | undefined;
+      if (typeof requestSeq === 'number') {
+        this.requestAbortControllers.delete(requestSeq);
+      }
     }
+  }
+
+  // VS Code will send a DAP "cancel" request with the requestId (seq) of the request to cancel.
+  // We only support canceling long-running evaluate() calls at the moment.
+  protected cancelRequest(response: any, args: any): void {
+    const requestId = args?.requestId as number | undefined;
+    if (typeof requestId === 'number') {
+      const controller = this.requestAbortControllers.get(requestId);
+      controller?.abort();
+      this.requestAbortControllers.delete(requestId);
+    }
+
+    this.sendResponse(response);
   }
 
   protected async disconnectRequest(
     response: DebugProtocol.DisconnectResponse,
     args: DebugProtocol.DisconnectArguments
   ): Promise<void> {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `DisconnectRequest: ${JSON.stringify(args)}`);
     await this.stop();
     this.sendResponse(response);
   }
@@ -502,6 +497,7 @@ export class SorobanDebugSession extends DebugSession {
       });
 
       reader.on('line', (line: string) => {
+        this.logManager?.log(ManagerLogLevel.Debug, LogPhase.Backend, line);
         this.sendEvent(new LogOutputEvent(line + '\n', LogLevel.Log));
       });
       this.outputReaders.push(reader);
@@ -515,6 +511,7 @@ export class SorobanDebugSession extends DebugSession {
       });
 
       reader.on('line', (line: string) => {
+        this.logManager?.log(ManagerLogLevel.Error, LogPhase.Backend, line);
         this.sendEvent(new LogOutputEvent(line + '\n', LogLevel.Error));
       });
       this.outputReaders.push(reader);
@@ -639,10 +636,28 @@ export class SorobanDebugSession extends DebugSession {
       return;
     }
 
-    const [inspection, storage] = await Promise.all([
-      this.debuggerProcess.inspect(),
-      this.debuggerProcess.getStorage()
-    ]);
+    this.refreshAbortController?.abort();
+    const controller = new AbortController();
+    this.refreshAbortController = controller;
+    const generation = (this.refreshGeneration += 1);
+
+    let inspection;
+    let storage;
+    try {
+      [inspection, storage] = await Promise.all([
+        this.debuggerProcess.inspect({ signal: controller.signal }),
+        this.debuggerProcess.getStorage({ signal: controller.signal })
+      ]);
+    } catch (error) {
+      if ((error as any)?.name === 'AbortError' || (error as any)?.name === 'TimeoutError') {
+        return;
+      }
+      throw error;
+    }
+
+    if (controller.signal.aborted || generation !== this.refreshGeneration) {
+      return;
+    }
 
     this.state.callStack = inspection.callStack.map((frame, index) => {
       let sourcePath = frame;
@@ -675,88 +690,18 @@ export class SorobanDebugSession extends DebugSession {
       };
     });
     this.state.args = inspection.args;
-    this.state.variables = this.storageToVariables(storage);
-  }
-
-  private argsToVariables(args: string | undefined): Variable[] {
-    if (!args) {
-      return [{
-        name: '(args)',
-        value: '(none)',
-        type: 'string',
-        variablesReference: 0
-      }];
-    }
-
-    try {
-      const parsed = JSON.parse(args);
-      return this.valueToVariables(parsed, 'arg');
-    } catch {
-      return [{
-        name: '(args)',
-        value: args,
-        type: 'string',
-        variablesReference: 0
-      }];
-    }
-  }
-
-  private valueToVariables(value: any, keyPrefix: string): Variable[] {
-    if (Array.isArray(value)) {
-      return value.slice(0, 100).map((item, index) => this.makeVariable(`${keyPrefix}${index}`, item));
-    }
-
-    if (value && typeof value === 'object') {
-      return Object.keys(value)
-        .sort((a, b) => a.localeCompare(b))
-        .slice(0, 100)
-        .map((key) => this.makeVariable(key, value[key]));
-    }
-
-    return [this.makeVariable(keyPrefix, value)];
-  }
-
-  private makeVariable(name: string, value: any): Variable {
-    if (value === null || value === undefined) {
-      return { name, value: String(value), type: 'null', variablesReference: 0 };
-    }
-
-    if (typeof value === 'string') {
-      return { name, value, type: 'string', variablesReference: 0 };
-    }
-
-    if (typeof value === 'number' || typeof value === 'boolean') {
-      return { name, value: String(value), type: typeof value, variablesReference: 0 };
-    }
-
-    if (Array.isArray(value)) {
-      const ref = this.nextVarHandle++;
-      this.variableHandles.set(ref, this.valueToVariables(value, `${name}[`));
-      return { name, value: `Array(${value.length})`, type: 'array', variablesReference: ref };
-    }
-
-    if (typeof value === 'object') {
-      const keys = Object.keys(value);
-      const ref = this.nextVarHandle++;
-      this.variableHandles.set(ref, this.valueToVariables(value, name));
-      return { name, value: `Object(${keys.length})`, type: 'object', variablesReference: ref };
-    }
-
-    return { name, value: String(value), type: typeof value, variablesReference: 0 };
-  }
-
-  private storageToVariables(storage: Record<string, unknown>): Variable[] {
-    return Object.entries(storage)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, value]) => ({
-        name,
-        value: typeof value === 'string' ? value : JSON.stringify(value),
-        type: Array.isArray(value) ? 'array' : typeof value,
-        variablesReference: 0
-      }));
+    this.state.storage = storage;
   }
 
   public async stop(): Promise<void> {
+    this.refreshAbortController?.abort();
+    this.refreshAbortController = null;
+
+    for (const controller of this.requestAbortControllers.values()) {
+      controller.abort();
+    }
+    this.requestAbortControllers.clear();
+
     for (const reader of this.outputReaders) {
       reader.close();
     }
@@ -770,7 +715,7 @@ export class SorobanDebugSession extends DebugSession {
     this.state.isRunning = false;
     this.state.isPaused = false;
     this.state.callStack = [];
-    this.state.variables = [];
+    this.state.storage = {};
     this.state.args = undefined;
     this.hasExecuted = false;
     this.sourceFunctionBreakpoints.clear();

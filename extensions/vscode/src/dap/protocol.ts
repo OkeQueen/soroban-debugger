@@ -1,3 +1,6 @@
+export const WIRE_PROTOCOL_MIN_VERSION = 1;
+export const WIRE_PROTOCOL_MAX_VERSION = 1;
+
 export interface BreakpointLocation {
   id: string;
   source: string;
@@ -67,7 +70,7 @@ export interface DebuggerState {
   currentThread?: number;
   breakpoints: Map<string, BreakpointLocation[]>;
   callStack?: StackFrame[];
-  variables?: Variable[];
+  storage?: Record<string, unknown>;
   args?: string;
 }
 

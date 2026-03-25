@@ -41,21 +41,6 @@ impl SourceMap {
 
     /// Load debug info from WASM bytes and build the mapping
     pub fn load(&mut self, wasm_bytes: &[u8]) -> Result<()> {
-        let obj = object::File::parse(wasm_bytes)
-            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to parse WASM object file: {}", e)))?;
-
-        let load_section =
-            |id: gimli::SectionId| -> std::result::Result<EndianSlice<RunTimeEndian>, gimli::Error> {
-                let data = obj
-                    .section_by_name(id.name())
-                    .or_else(|| obj.section_by_name(&format!(".{}", id.name())))
-                    .and_then(|s| s.data().ok())
-                    .unwrap_or(&[]);
-                Ok(EndianSlice::new(data, RunTimeEndian::Little))
-            };
-
-        let dwarf = Dwarf::load(&load_section)
-            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to load DWARF sections: {}", e)))?;
         self.offsets.clear();
         self.code_section_range = crate::utils::wasm::code_section_range(wasm_bytes)?;
 

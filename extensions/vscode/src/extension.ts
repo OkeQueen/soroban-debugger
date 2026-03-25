@@ -6,6 +6,7 @@ import {
   validateLaunchConfig
 } from './cli/debuggerProcess';
 import { SorobanDebugAdapterDescriptorFactory } from './debug/adapter';
+import { LogManager } from './debug/logManager';
 
 type SorobanLaunchConfig = vscode.DebugConfiguration & DebuggerProcessConfig;
 
@@ -21,6 +22,10 @@ class SorobanDebugConfigurationProvider implements vscode.DebugConfigurationProv
     if (config.type !== 'soroban' || config.request !== 'launch') {
       return config;
     }
+
+    const settings = vscode.workspace.getConfiguration('soroban-debugger', folder);
+    config.requestTimeoutMs = config.requestTimeoutMs ?? settings.get<number>('requestTimeoutMs');
+    config.connectTimeoutMs = config.connectTimeoutMs ?? settings.get<number>('connectTimeoutMs');
 
     const preflight = await validateLaunchConfig(config);
     if (preflight.ok) {
@@ -112,18 +117,12 @@ class SorobanDebugConfigurationProvider implements vscode.DebugConfigurationProv
   }
 }
 
-export function activate(context: vscode.ExtensionContext): void {
-  const factory = new SorobanDebugAdapterDescriptorFactory(context);
-  const configurationProvider = new SorobanDebugConfigurationProvider();
+let logManager: LogManager | undefined;
 
-  const configProvider: vscode.DebugConfigurationProvider = {
-    resolveDebugConfiguration(folder, config) {
-      const settings = vscode.workspace.getConfiguration('soroban-debugger', folder);
-      config.requestTimeoutMs = config.requestTimeoutMs ?? settings.get<number>('requestTimeoutMs');
-      config.connectTimeoutMs = config.connectTimeoutMs ?? settings.get<number>('connectTimeoutMs');
-      return config;
-    }
-  };
+export function activate(context: vscode.ExtensionContext): void {
+  logManager = new LogManager(context);
+  const factory = new SorobanDebugAdapterDescriptorFactory(context, logManager);
+  const configurationProvider = new SorobanDebugConfigurationProvider();
 
   context.subscriptions.push(
     vscode.debug.registerDebugAdapterDescriptorFactory('soroban', factory),
@@ -133,7 +132,9 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // Cleanup on extension deactivation
+  if (logManager) {
+    logManager.dispose();
+  }
 }
 
 async function ensureLaunchConfig(folder: vscode.WorkspaceFolder | undefined): Promise<void> {

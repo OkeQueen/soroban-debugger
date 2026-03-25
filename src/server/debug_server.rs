@@ -1,8 +1,9 @@
-use crate::debugger::engine::{DebuggerEngine, StepOverResult};
-use crate::runtime::executor::ContractExecutor;
-use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::breakpoint::{BreakpointManager, BreakpointSpec};
+use crate::debugger::engine::{DebuggerEngine, StepOverResult};
 use crate::inspector::budget::BudgetInspector;
+use crate::server::protocol::{
+    negotiate_protocol_version, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
+};
 use crate::server::protocol::{
     BreakpointCapabilities, BreakpointDescriptor, DebugMessage, DebugRequest, DebugResponse,
 };
@@ -12,7 +13,7 @@ use std::fs;
 use std::io::BufReader as StdBufReader;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
 use tokio_rustls::TlsAcceptor;
@@ -92,7 +93,7 @@ impl DebugServer {
 
     async fn handle_single_connection<S>(&mut self, stream: S) -> Result<()>
     where
-        S: tokio::io::AsyncRead + AsyncWriteExt + Unpin,
+        S: tokio::io::AsyncRead + AsyncWrite + Unpin,
     {
         let mut authenticated = self.token.is_none();
         let mut handshake_done = false;
@@ -110,10 +111,18 @@ impl DebugServer {
                 break;
             }
 
-            let message: DebugMessage = match serde_json::from_str(line.trim_end()) {
+            let message = match DebugMessage::parse(line.trim_end()) {
                 Ok(msg) => msg,
                 Err(e) => {
                     warn!("Failed to parse request: {}", e);
+                    let response = DebugMessage::response(
+                        0, // ID might be unknown if parse failed, but often it's available. 
+                           // For now use 0 or try to extract it if possible.
+                        DebugResponse::Error {
+                            message: format!("Malformed request: {}", e),
+                        },
+                    );
+                    let _ = send_response(&mut writer, response).await;
                     continue;
                 }
             };
@@ -121,6 +130,18 @@ impl DebugServer {
                 warn!("Received message without request");
                 continue;
             };
+
+            if matches!(request, DebugRequest::Unknown) {
+                let response = DebugMessage::response(
+                    message.id,
+                    DebugResponse::Error {
+                        message: "Unknown request type. Try upgrading the server.".to_string(),
+                    },
+                );
+                send_response(&mut writer, response).await?;
+                continue;
+            }
+
             info!("Received request: {}", summarize_request(&request));
 
             if matches!(request, DebugRequest::Ping) {
@@ -222,6 +243,9 @@ impl DebugServer {
                     success: true,
                     message: "Already authenticated".to_string(),
                 },
+                DebugRequest::Handshake { .. } => DebugResponse::Error {
+                    message: "Protocol handshake already completed".to_string(),
+                },
                 DebugRequest::LoadContract { contract_path } => match fs::read(&contract_path) {
                     Ok(bytes) => {
                         match crate::runtime::executor::ContractExecutor::new(bytes.clone()) {
@@ -248,10 +272,11 @@ impl DebugServer {
                 DebugRequest::Execute { function, args } => match self.engine.as_mut() {
                     Some(engine) if engine.breakpoints().should_break(&function) => {
                         match current_storage(engine) {
-                            Ok(storage) => match engine
-                                .breakpoints_mut()
-                                .on_hit(&function, &storage, args.as_deref())
-                            {
+                            Ok(storage) => match engine.breakpoints_mut().on_hit(
+                                &function,
+                                &storage,
+                                args.as_deref(),
+                            ) {
                                 Ok(Some(hit)) => {
                                     for message in hit.log_messages {
                                         println!("{message}");
@@ -288,7 +313,7 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::StepIn => match self.engine.as_mut() {
+                DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
                             let (current_function, step_count) = engine
@@ -403,6 +428,26 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
+                DebugRequest::StepOverLine => match self.engine.as_mut() {
+                    Some(engine) => match engine.step_over_source_line() {
+                        Ok(StepOverResult { paused, location }) => {
+                            DebugResponse::StepOverLineResult {
+                                paused,
+                                file: location
+                                    .as_ref()
+                                    .map(|l| l.file.to_string_lossy().into_owned()),
+                                line: location.as_ref().map(|l| l.line),
+                                column: location.and_then(|l| l.column),
+                            }
+                        }
+                        Err(e) => DebugResponse::Error {
+                            message: format!("StepOverLine failed: {}", e),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
                 DebugRequest::Continue => match self.engine.as_mut() {
                     Some(engine) => {
                         if let Some(pending) = self.pending_execution.take() {
@@ -444,50 +489,6 @@ impl DebugServer {
                             }
                         }
                     }
-                }
-            }
-
-            DebugRequest::StepOverLine => {
-                if let Some(engine) = &session.engine {
-                    let mut engine = engine.lock().map_err(|e| {
-                        DebuggerError::ExecutionError(format!("Failed to lock engine: {}", e))
-                    })?;
-
-                    match engine.step_over_source_line() {
-                        Ok(StepOverResult { paused, location }) => {
-                            DebugResponse::StepOverLineResult {
-                                paused,
-                                file: location
-                                    .as_ref()
-                                    .map(|l| l.file.to_string_lossy().into_owned()),
-                                line: location.as_ref().map(|l| l.line),
-                                column: location.and_then(|l| l.column),
-                            }
-                        }
-                        Err(e) => DebugResponse::Error {
-                            message: format!("StepOverLine failed: {}", e),
-                        },
-                    }
-                } else {
-                    DebugResponse::Error {
-                        message: "No contract loaded".to_string(),
-                    }
-                }
-            }
-
-            DebugRequest::Continue => {
-                if let Some(engine) = &session.engine {
-                    let mut engine = engine.lock().map_err(|e| {
-                        DebuggerError::ExecutionError(format!("Failed to lock engine: {}", e))
-                    })?;
-
-                    match engine.continue_execution() {
-                        Ok(_) => {
-                            // Execution completed
-                            DebugResponse::ContinueResult {
-                                completed: true,
-                                output: None,
-                                error: None,
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
@@ -588,7 +589,8 @@ impl DebugServer {
                 } => match self.engine.as_mut() {
                     Some(engine) => {
                         let condition = match condition {
-                            Some(condition) => match BreakpointManager::parse_condition(&condition) {
+                            Some(condition) => match BreakpointManager::parse_condition(&condition)
+                            {
                                 Ok(condition) => Some(condition),
                                 Err(e) => {
                                     let response = DebugMessage::response(
@@ -622,7 +624,7 @@ impl DebugServer {
                             None => None,
                         };
 
-                        engine.breakpoints_mut().add(BreakpointSpec {
+                        engine.breakpoints_mut().add_spec(BreakpointSpec {
                             id: id.clone(),
                             function: function.clone(),
                             condition,
@@ -637,7 +639,7 @@ impl DebugServer {
                 },
                 DebugRequest::ClearBreakpoint { id } => match self.engine.as_mut() {
                     Some(engine) => {
-                        engine.breakpoints_mut().remove(&id);
+                        engine.breakpoints_mut().remove_by_id(&id);
                         DebugResponse::BreakpointCleared { id }
                     }
                     None => DebugResponse::Error {
@@ -651,11 +653,11 @@ impl DebugServer {
                             .list_detailed()
                             .into_iter()
                             .map(|breakpoint| BreakpointDescriptor {
-                                id: breakpoint.id,
-                                function: breakpoint.function,
-                                condition: breakpoint.condition,
-                                hit_condition: breakpoint.hit_condition,
-                                log_message: breakpoint.log_message,
+                                id: breakpoint.id.clone(),
+                                function: breakpoint.function.clone(),
+                                condition: breakpoint.condition.clone(),
+                                hit_condition: breakpoint.hit_condition.clone(),
+                                log_message: breakpoint.log_message.clone(),
                             })
                             .collect(),
                     },
@@ -784,7 +786,7 @@ impl DebugServer {
 
 async fn send_response<S>(stream: &mut S, response: DebugMessage) -> Result<()>
 where
-    S: AsyncWriteExt + Unpin,
+    S: AsyncWrite + Unpin,
 {
     let json = serde_json::to_vec(&response)
         .map_err(|e| miette::miette!("Failed to serialize response: {}", e))?;
@@ -825,17 +827,7 @@ fn execute_without_breakpoints(
 }
 
 fn current_storage(engine: &DebuggerEngine) -> Result<std::collections::HashMap<String, String>> {
-    let snapshot = engine.executor().get_storage_snapshot()?;
-    Ok(snapshot
-        .into_iter()
-        .map(|(key, value)| {
-            let value = match value {
-                serde_json::Value::String(value) => value,
-                other => other.to_string(),
-            };
-            (key, value)
-        })
-        .collect())
+    engine.executor().get_storage_snapshot()
 }
 
 fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
@@ -865,6 +857,17 @@ fn load_tls_config(cert_path: &Path, key_path: &Path) -> Result<ServerConfig> {
         .map_err(|e| miette::miette!("Failed to setup TLS config: {}", e))?;
 
     Ok(config)
+}
+
+fn summarize_request(request: &DebugRequest) -> String {
+    match request {
+        DebugRequest::Authenticate { token } => format!(
+            "Authenticate {{ token: <redacted:{} chars> }}",
+            token.chars().count()
+        ),
+        DebugRequest::SetStorage { .. } => "SetStorage { storage_json: <redacted> }".to_string(),
+        _ => format!("{request:?}"),
+    }
 }
 
 #[cfg(test)]

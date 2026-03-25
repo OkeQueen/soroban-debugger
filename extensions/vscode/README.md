@@ -151,6 +151,12 @@ When execution is paused:
 2. Expand the **Variables** section to see contract storage state
 3. Hover over variables to see detailed information
 
+#### Large / Nested Values
+
+- Arrays and objects expand lazily and are paginated with an explicit `… show more` entry to avoid freezing the UI.
+- Long string values are truncated with a `(truncated, expand)` hint; expanding reveals the full value.
+- Typed argument annotations like `{"type":"bytes","value":"0x..."}` render as `bytes(n)` previews; expanding shows hex/base64/utf8 details.
+
 ### Using the Call Stack
 
 The **Call Stack** panel shows:
@@ -246,6 +252,15 @@ For troubleshooting the Debug Adapter Protocol communication:
 ```
 
 Trace output appears in the Debug Console (Ctrl+Shift+U).
+
+### Diagnostic Logging
+
+The extension now maintains persistent, structured logs for all debug sessions. These are invaluable for diagnosing environment-specific failures or backend crashes.
+
+- **Real-time logs**: View the "Soroban Debugger" output channel in the Output panel.
+- **Persistent logs**: Session logs are stored in the extension's global storage directory and rotated when they reach 10MB.
+- **Phased tracking**: Logs are categorized into phases such as `Spawn`, `Connect`, `Auth`, `Load`, and `Execution`.
+- **Privacy**: Authentication tokens are automatically redacted from all log files.
 
 ## Architecture
 
