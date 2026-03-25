@@ -1,8 +1,11 @@
 use crate::{DebuggerError, Result};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::cmp::Ordering;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunHistory {
@@ -17,9 +20,97 @@ pub struct HistoryManager {
     file_path: PathBuf,
 }
 
+fn parse_history_date_to_utc_millis(date: &str) -> Option<i64> {
+    let date = date.trim();
+    if date.is_empty() {
+        return None;
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(date) {
+        return Some(dt.with_timezone(&Utc).timestamp_millis());
+    }
+
+    if let Ok(dt) = DateTime::parse_from_rfc2822(date) {
+        return Some(dt.with_timezone(&Utc).timestamp_millis());
+    }
+
+    const FORMATS: &[&str] = &[
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+    ];
+
+    for fmt in FORMATS {
+        if fmt.contains("%H") {
+            if let Ok(naive) = NaiveDateTime::parse_from_str(date, fmt) {
+                return Some(
+                    DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc).timestamp_millis(),
+                );
+            }
+        } else if let Ok(naive) = NaiveDate::parse_from_str(date, fmt) {
+            let naive_dt = naive.and_hms_opt(0, 0, 0)?;
+            return Some(
+                DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc).timestamp_millis(),
+            );
+        }
+    }
+
+    None
+}
+
+fn compare_run_history_date(a: &RunHistory, b: &RunHistory) -> Ordering {
+    match (
+        parse_history_date_to_utc_millis(&a.date),
+        parse_history_date_to_utc_millis(&b.date),
+    ) {
+        (Some(at), Some(bt)) => at.cmp(&bt),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => a.date.cmp(&b.date),
+    }
+}
+
+/// Sorts records chronologically (oldest -> newest) using parsed timestamps when possible.
+///
+/// Records with unparseable dates are sorted after parseable ones, with a stable lexical fallback.
+pub fn sort_records_by_date(records: &mut [RunHistory]) {
+    records.sort_by(compare_run_history_date);
+}
+
+struct HistoryLockGuard {
+    lock_path: PathBuf,
+}
+
+impl Drop for HistoryLockGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.lock_path);
+    }
+}
+
 impl HistoryManager {
     /// Create a new HistoryManager using the default `~/.soroban-debug/history.json` path.
     pub fn new() -> Result<Self> {
+        if let Ok(path) = std::env::var("SOROBAN_DEBUG_HISTORY_FILE") {
+            let file_path = PathBuf::from(path);
+            if let Some(parent) = file_path.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    fs::create_dir_all(parent).map_err(|e| {
+                        DebuggerError::FileError(format!(
+                            "Failed to create history directory {:?}: {}",
+                            parent, e
+                        ))
+                    })?;
+                }
+            }
+            return Ok(Self { file_path });
+        }
+
         let home_dir = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
             .map_err(|_| {
@@ -63,18 +154,40 @@ impl HistoryManager {
 
     /// Append a new record optimizing with BufWriter.
     pub fn append_record(&self, record: RunHistory) -> Result<()> {
+        let _lock = self.acquire_lock()?;
         let mut history = self.load_history()?;
         history.push(record);
-        let file = File::create(&self.file_path).map_err(|e| {
+
+        let tmp_path = self.file_path.with_extension("json.tmp");
+        let file = File::create(&tmp_path).map_err(|e| {
             DebuggerError::FileError(format!(
-                "Failed to create history file {:?}: {}",
+                "Failed to create temp history file {:?}: {}",
+                tmp_path, e
+            ))
+        })?;
+        let mut writer = BufWriter::new(file);
+        serde_json::to_writer_pretty(&mut writer, &history).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to write history file {:?}: {}",
                 self.file_path, e
             ))
         })?;
-        let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &history).map_err(|e| {
+        writer.flush().map_err(|e| {
             DebuggerError::FileError(format!(
-                "Failed to write history file {:?}: {}",
+                "Failed to flush temp history file {:?}: {}",
+                tmp_path, e
+            ))
+        })?;
+        if let Some(file) = writer.into_inner().ok() {
+            let _ = file.sync_all();
+        }
+
+        if self.file_path.exists() {
+            let _ = fs::remove_file(&self.file_path);
+        }
+        fs::rename(&tmp_path, &self.file_path).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to replace history file {:?}: {}",
                 self.file_path, e
             ))
         })?;
@@ -104,6 +217,50 @@ impl HistoryManager {
             .collect();
         Ok(filtered)
     }
+
+    fn acquire_lock(&self) -> Result<HistoryLockGuard> {
+        let lock_path = self.file_path.with_extension("lock");
+        let start = SystemTime::now();
+
+        loop {
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(mut f) => {
+                    let _ = writeln!(f, "pid={}", std::process::id());
+                    return Ok(HistoryLockGuard { lock_path });
+                }
+                Err(_) => {
+                    // If a previous process crashed, allow breaking a stale lock after a grace period.
+                    if let Ok(meta) = fs::metadata(&lock_path) {
+                        if let Ok(modified) = meta.modified() {
+                            if modified
+                                .elapsed()
+                                .unwrap_or(Duration::from_secs(0))
+                                .as_secs()
+                                > 30
+                            {
+                                let _ = fs::remove_file(&lock_path);
+                                continue;
+                            }
+                        }
+                    }
+
+                    if start.elapsed().unwrap_or(Duration::from_secs(0)).as_secs() > 5 {
+                        return Err(DebuggerError::FileError(format!(
+                            "Timed out waiting for history lock at {:?}",
+                            lock_path
+                        ))
+                        .into());
+                    }
+
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+    }
 }
 
 /// Calculate the delta between the last two runs. Returns percentage increase if >10%.
@@ -111,8 +268,11 @@ pub fn check_regression(records: &[RunHistory]) -> Option<(f64, f64)> {
     if records.len() < 2 {
         return None;
     }
-    let latest = &records[records.len() - 1];
-    let previous = &records[records.len() - 2];
+
+    let mut sorted: Vec<&RunHistory> = records.iter().collect();
+    sorted.sort_by(|a, b| compare_run_history_date(a, b));
+    let latest = sorted[sorted.len() - 1];
+    let previous = sorted[sorted.len() - 2];
 
     let mut regression_cpu = 0.0;
     let mut regression_mem = 0.0;
@@ -176,12 +336,15 @@ pub fn budget_trend_stats(records: &[RunHistory]) -> Option<BudgetTrendStats> {
         mem_sum = mem_sum.saturating_add(r.memory_used as u128);
     }
 
-    let count = records.len();
-    let last = &records[count - 1];
+    let mut sorted: Vec<&RunHistory> = records.iter().collect();
+    sorted.sort_by(|a, b| compare_run_history_date(a, b));
+    let count = sorted.len();
+    let first = sorted[0];
+    let last = sorted[count - 1];
 
     Some(BudgetTrendStats {
         count,
-        first_date: records[0].date.clone(),
+        first_date: first.date.clone(),
         last_date: last.date.clone(),
         cpu_min,
         cpu_avg: (cpu_sum / count as u128) as u64,
@@ -198,6 +361,7 @@ pub fn budget_trend_stats(records: &[RunHistory]) -> Option<BudgetTrendStats> {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+    use tempfile::TempDir;
 
     #[test]
     fn test_regression_detection() {
@@ -246,6 +410,156 @@ mod tests {
     #[test]
     fn budget_trend_stats_empty_returns_none() {
         assert!(budget_trend_stats(&[]).is_none());
+    }
+
+    #[test]
+    fn sort_records_by_date_handles_mixed_formats() {
+        let mut records = vec![
+            RunHistory {
+                date: "01/02/2026 00:00:00".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 1,
+                memory_used: 1,
+            },
+            RunHistory {
+                date: "2026-01-01T00:00:00Z".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 1,
+                memory_used: 1,
+            },
+            RunHistory {
+                date: "2026-01-03".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 1,
+                memory_used: 1,
+            },
+        ];
+
+        sort_records_by_date(&mut records);
+        assert_eq!(records[0].date, "2026-01-01T00:00:00Z");
+        assert_eq!(records[1].date, "01/02/2026 00:00:00");
+        assert_eq!(records[2].date, "2026-01-03");
+    }
+
+    #[test]
+    fn budget_trend_stats_uses_parsed_date_order_for_first_last() {
+        let records = vec![
+            RunHistory {
+                date: "01/02/2026 00:00:00".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 10,
+                memory_used: 10,
+            },
+            RunHistory {
+                date: "2026-01-01T00:00:00Z".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 20,
+                memory_used: 20,
+            },
+        ];
+
+        let stats = budget_trend_stats(&records).unwrap();
+        assert_eq!(stats.first_date, "2026-01-01T00:00:00Z");
+        assert_eq!(stats.last_date, "01/02/2026 00:00:00");
+    }
+
+    #[test]
+    fn check_regression_uses_parsed_date_order_for_latest_two() {
+        let records = vec![
+            RunHistory {
+                date: "2026-01-02T00:00:00Z".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 100,
+                memory_used: 100,
+            },
+            // This one is newest by date but inserted second.
+            RunHistory {
+                date: "01/03/2026 00:00:00".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 120,
+                memory_used: 100,
+            },
+            RunHistory {
+                date: "2026-01-01".into(),
+                contract_hash: "hash".into(),
+                function: "f".into(),
+                cpu_used: 80,
+                memory_used: 100,
+            },
+        ];
+
+        let (cpu, mem) = check_regression(&records).unwrap();
+        assert_eq!(cpu, 20.0);
+        assert_eq!(mem, 0.0);
+    }
+
+    #[test]
+    fn concurrent_append_preserves_all_records() {
+        let temp = TempDir::new().unwrap();
+        let history_path = temp.path().join("history.json");
+        let manager = std::sync::Arc::new(HistoryManager::with_path(history_path));
+
+        let threads = 16usize;
+        let per_thread = 25usize;
+        let mut handles = Vec::new();
+
+        for t in 0..threads {
+            let manager = std::sync::Arc::clone(&manager);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..per_thread {
+                    let record = RunHistory {
+                        date: format!("t{t}-i{i}"),
+                        contract_hash: "hash".into(),
+                        function: "func".into(),
+                        cpu_used: (t as u64) * 10 + i as u64,
+                        memory_used: (t as u64) * 10 + i as u64,
+                    };
+                    manager.append_record(record).unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let history = manager.load_history().unwrap();
+        assert_eq!(history.len(), threads * per_thread);
+    }
+
+    #[test]
+    fn new_respects_history_file_env_override() {
+        let temp = TempDir::new().unwrap();
+        let history_path = temp.path().join("custom").join("history.json");
+
+        let old = std::env::var("SOROBAN_DEBUG_HISTORY_FILE").ok();
+        std::env::set_var("SOROBAN_DEBUG_HISTORY_FILE", &history_path);
+
+        let manager = HistoryManager::new().unwrap();
+        manager
+            .append_record(RunHistory {
+                date: "d".into(),
+                contract_hash: "h".into(),
+                function: "f".into(),
+                cpu_used: 1,
+                memory_used: 1,
+            })
+            .unwrap();
+
+        assert!(history_path.exists());
+
+        if let Some(old) = old {
+            std::env::set_var("SOROBAN_DEBUG_HISTORY_FILE", old);
+        } else {
+            std::env::remove_var("SOROBAN_DEBUG_HISTORY_FILE");
+        }
     }
 
     #[test]

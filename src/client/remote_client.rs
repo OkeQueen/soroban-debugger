@@ -1,14 +1,17 @@
-use crate::server::protocol::{DebugMessage, DebugRequest, DebugResponse};
+use crate::server::protocol::{
+    DebugMessage, DebugRequest, DebugResponse, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
+};
 use crate::{DebuggerError, Result};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use tracing::info;
 
 /// Remote client for connecting to a debug server
 pub struct RemoteClient {
-    stream: TcpStream,
+    stream: BufReader<TcpStream>,
     message_id: u64,
     authenticated: bool,
+    selected_protocol_version: Option<u32>,
 }
 
 impl RemoteClient {
@@ -16,14 +19,17 @@ impl RemoteClient {
     pub fn connect(addr: &str, token: Option<String>) -> Result<Self> {
         info!("Connecting to debug server at {}", addr);
         let stream = TcpStream::connect(addr).map_err(|e| {
-            DebuggerError::FileError(format!("Failed to connect to {}: {}", addr, e))
+            DebuggerError::NetworkError(format!("Failed to connect to {}: {}", addr, e))
         })?;
 
         let mut client = Self {
-            stream,
+            stream: BufReader::new(stream),
             message_id: 0,
             authenticated: token.is_none(),
+            selected_protocol_version: None,
         };
+
+        client.handshake("rust-remote-client", env!("CARGO_PKG_VERSION"))?;
 
         // Authenticate if token is provided
         if let Some(token) = token {
@@ -31,6 +37,98 @@ impl RemoteClient {
         }
 
         Ok(client)
+    }
+
+    /// Connect with deterministic connect + IO timeouts to avoid hanging on half-open connections.
+    pub fn connect_with_timeout(
+        addr: &str,
+        token: Option<String>,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        info!(
+            "Connecting to debug server at {} (timeout {:?})",
+            addr, timeout
+        );
+
+        let mut last_err: Option<DebuggerError> = None;
+        let addrs = addr.to_socket_addrs().map_err(|e| {
+            DebuggerError::NetworkError(format!("Failed to resolve {}: {}", addr, e))
+        })?;
+
+        for socket_addr in addrs {
+            match TcpStream::connect_timeout(&socket_addr, timeout) {
+                Ok(stream) => {
+                    stream.set_read_timeout(Some(timeout)).map_err(|e| {
+                        DebuggerError::NetworkError(format!("Failed to set read timeout: {}", e))
+                    })?;
+                    stream.set_write_timeout(Some(timeout)).map_err(|e| {
+                        DebuggerError::NetworkError(format!("Failed to set write timeout: {}", e))
+                    })?;
+
+                    let mut client = Self {
+                        stream: BufReader::new(stream),
+                        message_id: 0,
+                        authenticated: token.is_none(),
+                        selected_protocol_version: None,
+                    };
+
+                    client.handshake("rust-remote-client", env!("CARGO_PKG_VERSION"))?;
+
+                    if let Some(token) = token {
+                        client.authenticate(&token)?;
+                    }
+
+                    return Ok(client);
+                }
+                Err(e) => {
+                    last_err = Some(DebuggerError::NetworkError(format!(
+                        "Failed to connect to {}: {}",
+                        socket_addr, e
+                    )));
+                }
+            }
+        }
+
+        Err(last_err
+            .unwrap_or_else(|| {
+                DebuggerError::NetworkError(format!("Failed to connect to {}", addr))
+            })
+            .into())
+    }
+
+    pub fn selected_protocol_version(&self) -> Option<u32> {
+        self.selected_protocol_version
+    }
+
+    /// Perform a protocol handshake and verify compatibility.
+    pub fn handshake(&mut self, client_name: &str, client_version: &str) -> Result<u32> {
+        let response = self.send_request(DebugRequest::Handshake {
+            client_name: client_name.to_string(),
+            client_version: client_version.to_string(),
+            protocol_min: PROTOCOL_MIN_VERSION,
+            protocol_max: PROTOCOL_MAX_VERSION,
+        })?;
+
+        match response {
+            DebugResponse::HandshakeAck {
+                selected_version, ..
+            } => {
+                self.selected_protocol_version = Some(selected_version);
+                Ok(selected_version)
+            }
+            DebugResponse::IncompatibleProtocol { message, .. } => {
+                Err(DebuggerError::ExecutionError(format!(
+                    "Incompatible debugger protocol: {}",
+                    message
+                ))
+                .into())
+            }
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to Handshake".to_string())
+                    .into(),
+            ),
+        }
     }
 
     /// Authenticate with the server
@@ -356,7 +454,9 @@ impl RemoteClient {
         if !self.authenticated
             && !matches!(
                 request,
-                DebugRequest::Authenticate { .. } | DebugRequest::Ping
+                DebugRequest::Handshake { .. }
+                    | DebugRequest::Authenticate { .. }
+                    | DebugRequest::Ping
             )
         {
             return Err(DebuggerError::ExecutionError(
@@ -366,37 +466,82 @@ impl RemoteClient {
         }
 
         self.message_id += 1;
-        let message = DebugMessage::request(self.message_id, request);
+        let expected_id = self.message_id;
+        let message = DebugMessage::request(expected_id, request);
 
         let request_json = serde_json::to_string(&message)
             .map_err(|e| DebuggerError::FileError(format!("Failed to serialize request: {}", e)))?;
 
         // Send request
-        writeln!(self.stream, "{}", request_json)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to write to stream: {}", e)))?;
+        writeln!(self.stream.get_mut(), "{}", request_json).map_err(|e| {
+            DebuggerError::NetworkError(format!("Failed to write to stream: {}", e))
+        })?;
         self.stream
+            .get_mut()
             .flush()
-            .map_err(|e| DebuggerError::FileError(format!("Failed to flush stream: {}", e)))?;
+            .map_err(|e| DebuggerError::NetworkError(format!("Failed to flush stream: {}", e)))?;
 
         // Read response
-        let reader = BufReader::new(&self.stream);
-        let mut lines = reader.lines();
-        let response_line = lines
-            .next()
-            .ok_or_else(|| DebuggerError::FileError("No response from server".to_string()))?
-            .map_err(|e| DebuggerError::FileError(format!("Failed to read response: {}", e)))?;
+        let mut response_line = String::new();
+        let n = self
+            .stream
+            .read_line(&mut response_line)
+            .map_err(|e| DebuggerError::NetworkError(format!("Failed to read response: {}", e)))?;
+        if n == 0 {
+            return Err(DebuggerError::NetworkError("No response from server".to_string()).into());
+        }
 
-        let response_message: DebugMessage = serde_json::from_str(&response_line)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to parse response: {}", e)))?;
-
-        response_message.response.ok_or_else(|| {
-            DebuggerError::FileError("Response message has no response field".to_string()).into()
-        })
+        parse_response_line(expected_id, response_line.trim_end())
     }
+}
+
+fn parse_response_line(expected_id: u64, response_line: &str) -> Result<DebugResponse> {
+    let response_message: DebugMessage = serde_json::from_str(response_line)
+        .map_err(|e| DebuggerError::FileError(format!("Failed to parse response: {}", e)))?;
+
+    if response_message.id != expected_id {
+        return Err(DebuggerError::ExecutionError(format!(
+            "Mismatched response id: expected {} got {}",
+            expected_id, response_message.id
+        ))
+        .into());
+    }
+
+    response_message.response.ok_or_else(|| {
+        DebuggerError::FileError("Response message has no response field".to_string()).into()
+    })
 }
 
 impl Drop for RemoteClient {
     fn drop(&mut self) {
         let _ = self.disconnect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::protocol::DebugResponse;
+
+    #[test]
+    fn parse_response_line_rejects_mismatched_ids() {
+        let msg = DebugMessage::response(42, DebugResponse::Pong);
+        let line = serde_json::to_string(&msg).unwrap();
+        let err = parse_response_line(7, &line).unwrap_err();
+        assert!(err.to_string().contains("Mismatched response id"));
+    }
+
+    #[test]
+    fn parse_response_line_accepts_matching_ids() {
+        let msg = DebugMessage::response(7, DebugResponse::Pong);
+        let line = serde_json::to_string(&msg).unwrap();
+        let resp = parse_response_line(7, &line).unwrap();
+        assert!(matches!(resp, DebugResponse::Pong));
+    }
+
+    #[test]
+    fn connect_failure_is_network_error_category() {
+        let err = RemoteClient::connect("127.0.0.1:1", None).unwrap_err();
+        assert!(err.to_string().contains("Network/transport error"));
     }
 }
