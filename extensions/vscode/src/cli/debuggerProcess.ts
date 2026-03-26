@@ -166,44 +166,26 @@ export function formatProtocolMismatchMessage(
 }
 
 type DebugRequest =
-  | {
-      type: "Handshake";
-      client_name: string;
-      client_version: string;
-      protocol_min: number;
-      protocol_max: number;
-    }
-  | { type: "Authenticate"; token: string }
-  | { type: "LoadContract"; contract_path: string }
-  | { type: "Execute"; function: string; args?: string }
-  | { type: "StepIn" }
-  | { type: "Next" }
-  | { type: "StepOut" }
-  | { type: "Continue" }
-  | { type: "Inspect" }
-  | { type: "GetStorage" }
-  | {
-      type: "SetBreakpoint";
-      function: string;
-      id?: string;
-      condition?: string;
-      hit_condition?: string;
-      log_message?: string;
-    }
-  | { type: "ClearBreakpoint"; function?: string; id?: string }
-  | {
-      type: "ResolveSourceBreakpoints";
-      source_path: string;
-      lines: number[];
-      exported_functions: string[];
-    }
-  | { type: "Evaluate"; expression: string; frame_id?: number }
-  | { type: "Cancel" }
-  | { type: "Ping" }
-  | { type: "Disconnect" }
-  | { type: "LoadSnapshot"; snapshot_path: string }
-  | { type: "GetCapabilities" }
-  | { type: "Unknown" };
+  | { type: 'Handshake'; client_name: string; client_version: string; protocol_min: number; protocol_max: number }
+  | { type: 'Authenticate'; token: string }
+  | { type: 'LoadContract'; contract_path: string }
+  | { type: 'Execute'; function: string; args?: string }
+  | { type: 'StepIn' }
+  | { type: 'Next' }
+  | { type: 'StepOut' }
+  | { type: 'Continue' }
+  | { type: 'Inspect' }
+  | { type: 'GetStorage' }
+  | { type: 'SetBreakpoint'; id?: string; function: string; condition?: string; hit_condition?: string; log_message?: string }
+  | { type: 'ClearBreakpoint'; id?: string; function?: string }
+  | { type: 'ResolveSourceBreakpoints'; source_path: string; lines: number[]; exported_functions: string[] }
+  | { type: 'Evaluate'; expression: string; frame_id?: number }
+  | { type: 'Cancel' }
+  | { type: 'Ping' }
+  | { type: 'Disconnect' }
+  | { type: 'LoadSnapshot'; snapshot_path: string }
+  | { type: 'GetCapabilities' }
+  | { type: 'Unknown' };
 
 type DebugResponse =
   | {
@@ -967,9 +949,7 @@ export class DebuggerProcess {
           }
           this.pendingRequests.delete(id);
           pending.cleanup();
-          pending.reject(
-            new DebuggerTimeoutError(request.type, timeoutMs),
-          );
+          pending.reject(new DebuggerTimeoutError(request.type, timeoutMs));
         }, timeoutMs);
       }
 

@@ -219,6 +219,9 @@ export class SorobanDebugSession extends DebugSession {
       response.body = {
         breakpoints: breakpoints.map((bp) => {
           const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.requestedLine === bp.line);
+          const mbp = managedBreakpoints.find(m => m.line === bp.line);
+          const syncMessage = mbp ? syncErrors.get(mbp.id) : undefined;
+          const capabilityMessages = this.describeCapabilityFallback(bp);
           return {
             verified: match?.verified ?? false,
             line: match?.line ?? bp.line,
