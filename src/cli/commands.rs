@@ -1,3 +1,5 @@
+use crate::analyzer::security::{AnalyzerFilter, RuleMetadata, SecurityAnalyzer, Severity};
+use crate::analyzer::symbolic::{SymbolicAnalyzer, SymbolicConfig};
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
 use crate::analyzer::security::{AnalyzerFilter, SecurityAnalyzer, Severity};
 use crate::analyzer::symbolic::{SymbolicAnalyzer, SymbolicConfig};
@@ -20,6 +22,7 @@ use crate::ui::formatter::Formatter;
 use crate::ui::{run_dashboard, DebuggerUI};
 use crate::{DebuggerError, Result};
 use miette::WrapErr;
+use std::collections::HashMap;
 use std::fs;
 
 fn print_info(message: impl AsRef<str>) {
@@ -73,9 +76,11 @@ struct DynamicAnalysisMetadata {
 
 #[derive(serde::Serialize)]
 struct AnalyzeCommandOutput {
-    findings: Vec<crate::analyzer::security::SecurityFinding>,
-    dynamic_analysis: Option<DynamicAnalysisMetadata>,
-    warnings: Vec<String>,
+    pub schema_version: String,
+    pub findings: Vec<crate::analyzer::security::SecurityFinding>,
+    pub rules: HashMap<String, RuleMetadata>,
+    pub dynamic_analysis: Option<DynamicAnalysisMetadata>,
+    pub warnings: Vec<String>,
 }
 
 fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) -> String {
@@ -948,6 +953,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
     if args.is_json_output() {
         let mut output = serde_json::json!({
+            "schema_version": "1.0",
             "status": "success",
             "result": result,
             "sha256": wasm_hash,
@@ -1606,6 +1612,10 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
     // Create executor
     let mut executor = ContractExecutor::new(wasm_bytes)?;
 
+    // Apply timeout — consistent with run, interactive, and analyze.
+    // A value of 0 disables the timeout.
+    executor.set_timeout(args.timeout);
+
     // Initial storage (optional)
     if let Some(storage_json) = &args.storage {
         let storage = parse_storage(storage_json)?;
@@ -1855,11 +1865,13 @@ pub fn server(args: ServerArgs) -> Result<()> {
     ));
     if let Some(token) = &args.token {
         print_info("Token authentication enabled");
-        if token.trim().len() < 16 {
-            print_warning(
-                "Remote debug token is shorter than 16 characters. Prefer at least 16 characters \
-                 and ideally a random 32-byte token.",
-            );
+        if let Some(t) = &args.token {
+            if t.trim().len() < 16 {
+                print_warning(
+                    "Remote debug token is shorter than 16 characters. Prefer at least 16 characters \
+                     and ideally a random 32-byte token.",
+                );
+            }
         }
     } else {
         print_info("Token authentication disabled");
@@ -2173,7 +2185,9 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
         &filter,
     )?;
     let output = AnalyzeCommandOutput {
+        schema_version: "1.0".to_string(),
         findings: report.findings,
+        rules: report.rules,
         dynamic_analysis,
         warnings,
     };

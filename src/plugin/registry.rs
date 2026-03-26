@@ -704,7 +704,6 @@ impl PluginRegistry {
             Some(context),
             name,
             PluginInvocationKind::Hook,
-            self.policy.hook_timeout,
             start.elapsed(),
             result.map_err(|_| {
                 PluginError::ExecutionFailed("Plugin panicked during hook execution".to_string())
@@ -741,7 +740,6 @@ impl PluginRegistry {
             None,
             name,
             PluginInvocationKind::Command,
-            self.policy.command_timeout,
             start.elapsed(),
             result.map_err(|_| {
                 PluginError::ExecutionFailed("Plugin panicked during command execution".to_string())
@@ -778,7 +776,6 @@ impl PluginRegistry {
             None,
             name,
             PluginInvocationKind::Formatter,
-            self.policy.formatter_timeout,
             start.elapsed(),
             result.map_err(|_| {
                 PluginError::ExecutionFailed(
@@ -794,10 +791,14 @@ impl PluginRegistry {
         mut context: Option<&mut EventContext>,
         name: &str,
         kind: PluginInvocationKind,
-        timeout: Duration,
         elapsed: Duration,
         result: Result<PluginResult<T>, PluginError>,
     ) -> PluginResult<T> {
+        let timeout = match kind {
+            PluginInvocationKind::Hook => self.policy.hook_timeout,
+            PluginInvocationKind::Command => self.policy.command_timeout,
+            PluginInvocationKind::Formatter => self.policy.formatter_timeout,
+        };
         let state = health.entry(name.to_string()).or_default();
 
         match result {
@@ -809,7 +810,7 @@ impl PluginRegistry {
                 if state.consecutive_failures >= self.policy.max_consecutive_failures {
                     state.circuit_open = true;
                 }
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context.as_mut() {
                     Self::push_telemetry(
                         ctx,
                         name,
@@ -828,7 +829,7 @@ impl PluginRegistry {
                 if state.consecutive_failures >= self.policy.max_consecutive_failures {
                     state.circuit_open = true;
                 }
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context.as_mut() {
                     Self::push_telemetry(
                         ctx,
                         name,
@@ -840,7 +841,7 @@ impl PluginRegistry {
                 }
                 Err(err)
             }
-            Ok(Ok(value)) if elapsed > timeout => {
+            Ok(Ok(_value)) if elapsed > timeout => {
                 state.total_timeouts += 1;
                 state.total_failures += 1;
                 state.timeout_count += 1;
@@ -855,7 +856,7 @@ impl PluginRegistry {
                 {
                     state.circuit_open = true;
                 }
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context.as_mut() {
                     Self::push_telemetry(
                         ctx,
                         name,
@@ -872,7 +873,7 @@ impl PluginRegistry {
                 state.timeout_count = 0;
                 state.circuit_open = false;
                 state.last_error = None;
-                if let Some(ctx) = context.as_deref_mut() {
+                if let Some(ctx) = context.as_mut() {
                     Self::push_telemetry(
                         ctx,
                         name,
@@ -967,7 +968,6 @@ mod tests {
         Success,
         Fail,
         Sleep(Duration),
-        Panic,
     }
 
     struct TestPlugin {
@@ -1027,7 +1027,6 @@ mod tests {
                     thread::sleep(duration);
                     Ok(())
                 }
-                Behavior::Panic => panic!("hook panic"),
             }
         }
 
@@ -1047,7 +1046,6 @@ mod tests {
                     thread::sleep(duration);
                     Ok("slow".to_string())
                 }
-                Behavior::Panic => panic!("command panic"),
             }
         }
 

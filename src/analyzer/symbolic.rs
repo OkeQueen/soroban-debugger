@@ -94,7 +94,7 @@ struct GeneratedInputs {
 /// Shuffles `items` in-place using a seeded Fisher-Yates algorithm backed by a
 /// simple 64-bit LCG.  Given the same seed and the same input slice the result
 /// is always identical, which is the property we rely on for `--replay`.
-fn seeded_shuffle(items: &mut Vec<String>, seed: u64) {
+fn seeded_shuffle(items: &mut [String], seed: u64) {
     let n = items.len();
     if n < 2 {
         return;
@@ -637,6 +637,7 @@ mod tests {
                 truncated_by_path_cap: false,
                 truncated_by_timeout: false,
                 truncation_reasons: Vec::new(),
+                seed: None,
             },
         };
         let mut seen_inputs = HashSet::new();
@@ -667,6 +668,7 @@ mod tests {
                 truncated_by_path_cap: false,
                 truncated_by_timeout: false,
                 truncation_reasons: Vec::new(),
+                seed: None,
             },
         };
         let mut seen_inputs = HashSet::new();
@@ -822,6 +824,7 @@ mod tests {
                 truncation_reasons: vec![
                     "input combination cap reached at 64 generated combinations".to_string(),
                 ],
+                seed: None,
             },
         };
 
