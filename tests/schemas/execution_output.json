@@ -2,9 +2,13 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "RunCommandOutputEnvelope",
   "type": "object",
-  "required": ["schema_version", "command", "status", "result", "error"],
+  "required": ["schema_version", "status", "result", "sha256", "budget", "storage_diff"],
   "properties": {
     "schema_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+$"
+    },
+    "status": {
       "type": "string",
       "const": "1.0.0"
     },
