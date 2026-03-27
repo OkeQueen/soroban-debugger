@@ -50,6 +50,22 @@ impl LoadedPlugin {
     pub fn trust(&self) -> &PluginTrustAssessment {
         &self.trust
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_parts_for_tests(
+        plugin: Box<dyn InspectorPlugin>,
+        path: PathBuf,
+        manifest: PluginManifest,
+        trust: PluginTrustAssessment,
+    ) -> Self {
+        Self {
+            plugin,
+            library: None,
+            path,
+            manifest,
+            trust,
+        }
+    }
 }
 
 /// Plugin loader that handles dynamic loading of plugin libraries
