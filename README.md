@@ -152,6 +152,17 @@ Options:
   --tls-cert <FILE>     Path to TLS certificate for secure connections
   --tls-key <FILE>      Path to TLS private key
 
+### Remote Troubleshooting Matrix
+
+| Symptom | Likely cause | What to try |
+| --- | --- | --- |
+| Request timed out | Slow host or timeout too low for inspect/storage traffic | Increase `soroban-debug remote --timeout-ms`, `--inspect-timeout-ms`, or `--storage-timeout-ms` depending on the failing request. |
+| Incompatible debugger protocol | Client and server builds are out of sync | Rebuild or reinstall the CLI/server from the same revision or release line. |
+| Authentication failed | Token missing or mismatched | Make sure the server `--token` and client `--token` values match exactly. |
+| Loopback/connect failure | `localhost` blocked, wrong port, firewall, or container networking issue | Verify the server is listening, try `127.0.0.1`, and check your environment's loopback/network policy. |
+
+See [docs/remote-troubleshooting.md](./docs/remote-troubleshooting.md) for the full CLI and VS Code troubleshooting guide, including timeout tuning and adapter-specific advice.
+
 
 ### Automatic Test Generation
 
