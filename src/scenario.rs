@@ -106,8 +106,11 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
 
     for (i, step) in scenario.steps.iter().enumerate() {
         let step_label = step.name.as_deref().unwrap_or(&step.function);
-        let effective_timeout =
-            resolve_step_timeout(step.timeout_secs, scenario.defaults.timeout_secs, args.timeout);
+        let effective_timeout = resolve_step_timeout(
+            step.timeout_secs,
+            scenario.defaults.timeout_secs,
+            args.timeout,
+        );
         engine.executor_mut().set_timeout(effective_timeout);
         println!(
             "{}",

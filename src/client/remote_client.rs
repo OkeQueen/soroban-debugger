@@ -492,8 +492,11 @@ impl RemoteClient {
             protocol_max: 1,
         };
         // Use a standard timeout for handshake during reconnect
-        let _ = self.send_request_once(handshake, Duration::from_secs(5))
-            .map_err(|e| DebuggerError::ExecutionError(format!("Handshake failed during reconnect: {:?}", e)))?;
+        let _ = self
+            .send_request_once(handshake, Duration::from_secs(5))
+            .map_err(|e| {
+                DebuggerError::ExecutionError(format!("Handshake failed during reconnect: {:?}", e))
+            })?;
 
         if let Some(token) = self.token.clone() {
             self.authenticate(&token)?;
@@ -705,7 +708,9 @@ fn backoff_delay(base: Duration, max: Duration, attempt: usize) -> Duration {
         return base.min(max);
     }
 
-    let exp = 1u32.checked_shl((attempt - 1).min(31) as u32).unwrap_or(u32::MAX);
+    let exp = 1u32
+        .checked_shl((attempt - 1).min(31) as u32)
+        .unwrap_or(u32::MAX);
 
     base.checked_mul(exp).unwrap_or(max).min(max)
 }
@@ -920,13 +925,16 @@ mod tests {
                             DebugResponse::HandshakeAck {
                                 server_name: "test-server".to_string(),
                                 server_version: "0.1.0".to_string(),
-                                protocol_min: 1, protocol_max: 1, selected_version: 1,
+                                protocol_min: 1,
+                                protocol_max: 1,
+                                selected_version: 1,
                             },
                         );
-                        let _ = writeln!(writer, "{}", serde_json::to_string(&handshake_ack).unwrap());
+                        let _ =
+                            writeln!(writer, "{}", serde_json::to_string(&handshake_ack).unwrap());
                         let _ = writer.flush();
                     } else {
-                         continue;
+                        continue;
                     }
                 } else {
                     continue;

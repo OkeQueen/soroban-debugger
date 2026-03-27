@@ -34,6 +34,7 @@ pub use runtime::executor::ContractExecutor;
 pub type Result<T> = miette::Result<T>;
 
 /// Error types for the debugger
+#[allow(unused_assignments)] // False positive from derive macro expansion for named error fields.
 #[derive(Debug, thiserror::Error, Diagnostic)]
 pub enum DebuggerError {
     #[error("Failed to load WASM file: {0}")]

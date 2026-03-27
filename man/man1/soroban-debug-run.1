@@ -56,13 +56,7 @@ Output mode for command result rendering (pretty, json)
 .br
 
 .br
-\fIPossible values:\fR
-.RS 14
-.IP \(bu 2
-pretty
-.IP \(bu 2
-json
-.RE
+[\fIpossible values: \fRpretty, json]
 .TP
 \fB\-\-show\-events\fR
 Show contract events emitted during execution
@@ -115,8 +109,8 @@ Automatically generate a unit test file from the execution trace
 \fB\-\-overwrite\fR
 Overwrite the test file if it already exists (default: append)
 .TP
-\fB\-\-timeout\fR \fI<SECONDS>\fR [default: 30]
-Maximum time allowed for contract execution, in seconds. The command exits with a non\-zero status code if this limit is exceeded. Use 0 to disable the timeout
+\fB\-\-timeout\fR \fI<TIMEOUT>\fR [default: 30]
+Execution timeout in seconds (default: 30)
 .TP
 \fB\-\-alert\-on\-change\fR \fI<KEY_PATTERN>\fR
 Trigger a prominent alert when a critical storage key is modified (repeatable)

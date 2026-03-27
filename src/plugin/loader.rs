@@ -416,7 +416,6 @@ impl Drop for LoadedPlugin {
         if let Err(e) = self.plugin.shutdown() {
             error!("Error shutting down plugin {}: {}", self.manifest.name, e);
         }
-
     }
 }
 

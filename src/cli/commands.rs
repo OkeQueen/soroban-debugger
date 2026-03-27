@@ -3,8 +3,8 @@ use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyz
 use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, OutputFormat,
-    ProfileArgs, RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs,
-    SymbolicArgs, SymbolicProfile, TuiArgs, UpgradeCheckArgs, Verbosity,
+    ProfileArgs, RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs,
+    SymbolicProfile, TuiArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
@@ -1957,7 +1957,12 @@ fn inspect_source_map_diagnostics(args: &InspectArgs, wasm_bytes: &[u8]) -> Resu
                 contract: args.contract.display().to_string(),
                 source_map: report,
             };
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            let pretty = serde_json::to_string_pretty(&output).map_err(|e| {
+                DebuggerError::ExecutionError(format!(
+                    "Failed to serialize source-map diagnostics JSON output: {e}"
+                ))
+            })?;
+            println!("{pretty}");
         }
         OutputFormat::Pretty => {
             println!("Source Map Diagnostics");
@@ -1968,8 +1973,15 @@ fn inspect_source_map_diagnostics(args: &InspectArgs, wasm_bytes: &[u8]) -> Resu
 
             println!("\nDWARF sections:");
             for section in &report.sections {
-                let status = if section.present { "present" } else { "missing" };
-                println!("  {}: {} ({} bytes)", section.name, status, section.size_bytes);
+                let status = if section.present {
+                    "present"
+                } else {
+                    "missing"
+                };
+                println!(
+                    "  {}: {} ({} bytes)",
+                    section.name, status, section.size_bytes
+                );
             }
 
             if report.preview.is_empty() {
@@ -2177,7 +2189,10 @@ pub fn show_budget_trend(
             "Regression params: threshold>{:.1}% lookback={} smoothing={}",
             regression.threshold_pct, regression.lookback, regression.smoothing_window
         );
-        println!("Runs: {}   Range: {} -> {}", stats.count, stats.first_date, stats.last_date);
+        println!(
+            "Runs: {}   Range: {} -> {}",
+            stats.count, stats.first_date, stats.last_date
+        );
         println!(
             "CPU insns: last={}  avg={}  min={}  max={}",
             crate::inspector::budget::BudgetInspector::format_cpu_insns(stats.last_cpu),

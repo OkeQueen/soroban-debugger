@@ -48,8 +48,6 @@ impl Default for SymbolicConfig {
 }
 
 impl SymbolicConfig {
-
-
     pub const fn balanced() -> Self {
         Self {
             max_paths: 100,
@@ -233,9 +231,11 @@ impl SymbolicAnalyzer {
                     // Apply storage seed if provided
                     if let Some(ref storage) = config.storage_seed {
                         if let Err(e) = executor.set_initial_storage(storage.clone()) {
-                            return Err(crate::DebuggerError::StorageError(
-                                format!("Failed to set initial storage: {}", e)
-                            ).into());
+                            return Err(crate::DebuggerError::StorageError(format!(
+                                "Failed to set initial storage: {}",
+                                e
+                            ))
+                            .into());
                         }
                     }
                     executor.execute(function, Some(args_json))
@@ -1070,7 +1070,9 @@ mod tests {
             .analyze_with_config(&wasm, "entry", &config)
             .expect("symbolic analysis with storage seed should complete");
 
-        assert_eq!(report.metadata.config.storage_seed, Some(r#"{"counter": 100}"#.to_string()));
-
+        assert_eq!(
+            report.metadata.config.storage_seed,
+            Some(r#"{"counter": 100}"#.to_string())
+        );
     }
 }
