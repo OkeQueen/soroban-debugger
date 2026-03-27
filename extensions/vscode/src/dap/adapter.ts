@@ -409,7 +409,7 @@ export class SorobanDebugSession extends DebugSession {
       this.sendResponse(response);
 
       if (!this.hasExecuted) {
-        await this.runExecution('step');
+        await this.runExecution('breakpoint');
         return;
       }
 
