@@ -47,6 +47,20 @@ ci-local: fmt lint test-rust test-vscode check-man
 	@echo "✅ All local CI gates passed successfully!"
 	@echo "======================================="
 
+# Sandbox-compatible test profile
+# Skips test cases requiring network loopback binding in constrained environments.
+test-rust-sandbox:
+	cargo test --workspace --all-features -- --skip "parity_dap_server|dap_server"
+
+ci-sandbox: fmt lint test-rust-sandbox test-vscode check-man
+	@echo "======================================="
+	@echo "✅ Sandbox CI gates passed successfully!"
+	@echo "======================================="
+
+# Optional target for running just the network-dependent tests (explicitly bounded behavior).
+test-rust-network:
+	cargo test --workspace --all-features parity_dap_server
+
 clean:
 	cargo clean
 	rm -rf extensions/vscode/node_modules extensions/vscode/dist

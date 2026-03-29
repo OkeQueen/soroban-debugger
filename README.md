@@ -56,6 +56,19 @@ man soroban-debug
 man soroban-debug-run
 ```
 
+## CI / Developer Makefile Targets
+
+For sandbox or restricted CI environments where socket bind may fail, use:
+
+```bash
+make ci-sandbox
+```
+
+This target runs formatting, lint, non-network tests, VS Code tests, and man-page checks while skipping loopback TCP network-dependent tests.
+
+- `make test-rust-sandbox`: Run Rust tests excluding `parity_dap_server*` tests.
+- `make test-rust-network`: Run only network-dependent parity server tests.
+
 ## Quick Start
 
 ### Basic Usage
