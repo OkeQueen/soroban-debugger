@@ -1085,6 +1085,11 @@ fn summarize_request(request: &DebugRequest) -> String {
 }
 
 async fn setup_signal_handlers(shutdown: Arc<Notify>) {
+    #[cfg(unix)]
+    let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+
+    #[cfg(not(unix))]
+    let ctrl_c = tokio::signal::ctrl_c();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
 
     #[cfg(unix)]
