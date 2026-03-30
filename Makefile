@@ -10,6 +10,7 @@
 #   hooks-install Install pre-commit hooks for local validation
 #   hooks-check  Run pre-commit hooks against all files
 #   test-rust   Run Rust backend tests
+#   test-rust-network Run only loopback network-dependent Rust tests
 #   test-vscode Run VS Code extension tests
 #   ci-local    Run all practical gates developers must satisfy before pushing
 
@@ -44,6 +45,11 @@ test-rust-sandbox:
 
 test-rust-network:
 	cargo test --workspace --features network-tests
+
+test-rust-network:
+	@echo "Running network-dependent Rust integration tests only..."
+	cargo test --test parity_tests parity_dap_server
+	cargo test --test remote_run_tests test_remote_run_execution
 
 test-vscode:
 	cd extensions/vscode && npm install && npm run test
