@@ -22,6 +22,7 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
 pub struct DebugServer {
+    host: String,
     engine: Option<DebuggerEngine>,
     token: Option<String>,
     tls_config: Option<ServerConfig>,
@@ -39,6 +40,7 @@ struct PendingExecution {
 
 impl DebugServer {
     pub fn new(
+        host: String,
         token: Option<String>,
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
@@ -50,12 +52,13 @@ impl DebugServer {
             (None, None) => None,
             _ => {
                 return Err(miette::miette!(
-                    "TLS not supported unless both certificate and key are provided"
+                    "TLS requires both certificate and key paths (--tls-cert and --tls-key). Provide both flags together, or remove both flags to run without native TLS."
                 ));
             }
         };
 
         Ok(Self {
+            host,
             engine: None,
             token,
             tls_config,
@@ -68,7 +71,7 @@ impl DebugServer {
     }
 
     pub async fn run(mut self, port: u16) -> Result<()> {
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("{}:{}", self.host, port);
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
@@ -439,6 +442,7 @@ impl DebugServer {
                     source_path,
                     lines,
                     exported_functions,
+                    max_forward_line_adjust,
                 } => match (self.engine.as_ref(), self.contract_wasm.as_deref()) {
                     (Some(engine), Some(wasm_bytes)) => {
                         if let Some(source_map) = engine.source_map() {
@@ -449,6 +453,7 @@ impl DebugServer {
                                 Path::new(&source_path),
                                 &lines,
                                 &exported,
+                                max_forward_line_adjust,
                             );
                             DebugResponse::SourceBreakpointsResolved { breakpoints }
                         } else {
@@ -475,7 +480,7 @@ impl DebugServer {
                     if let Some(count) = self.repeat_count {
                         if count > 1 {
                             if let Some(wasm) = &self.contract_wasm {
-                                let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list().into_iter().map(|b| b.function).collect()).unwrap_or_default();
+                                let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list()).unwrap_or_default();
                                 let initial_storage = self.engine.as_ref().and_then(|e| e.executor().get_storage_snapshot().ok()).and_then(|s| serde_json::to_string(&s).ok());
                                 let runner = crate::repeat::RepeatRunner::new(wasm.clone(), breakpoints, initial_storage);
                                 match runner.run(&function, args.as_deref(), count) {
@@ -487,16 +492,22 @@ impl DebugServer {
                                             stats.min_memory, stats.max_memory, stats.avg_memory,
                                             if stats.inconsistent_results { "INCONSISTENT" } else { "CONSISTENT" }
                                         );
-                                        return Ok(DebugResponse::ExecutionResult {
+                                        let resp = DebugResponse::ExecutionResult {
                                             success: true,
                                             output,
                                             error: None,
                                             paused: false,
                                             completed: true,
                                             source_location: None,
-                                        });
+                                        };
+                                        send_msg(DebugMessage::response(message.id, resp))?;
+                                        continue;
                                     }
-                                    Err(e) => return Ok(DebugResponse::Error { message: e.to_string() }),
+                                    Err(e) => {
+                                        let resp = DebugResponse::Error { message: e.to_string() };
+                                        send_msg(DebugMessage::response(message.id, resp))?;
+                                        continue;
+                                    }
                                 }
                             }
                         }
@@ -564,7 +575,8 @@ impl DebugServer {
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
-                },
+                }
+            },
                 DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
@@ -1188,7 +1200,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_on_signal() {
-        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+            .expect("Failed to create server");
         let shutdown = server.shutdown.clone();
 
         let local = tokio::task::LocalSet::new();
@@ -1211,7 +1231,16 @@ mod tests {
 
     #[test]
     fn test_server_initialization() {
-        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+            .expect("Failed to create server");
+        assert_eq!(server.host, "127.0.0.1");
         assert!(server.engine.is_none());
         assert!(server.token.is_none());
         assert!(server.tls_config.is_none());
@@ -1220,8 +1249,34 @@ mod tests {
     #[test]
     fn test_server_with_token() {
         let token = "test-token-12345678".to_string();
-        let server =
-            DebugServer::new(Some(token.clone()), None, None).expect("Failed to create server");
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            Some(token.clone()),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("Failed to create server");
         assert_eq!(server.token, Some(token));
+    }
+
+    #[test]
+    fn test_server_rejects_partial_tls_configuration() {
+        let err = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            Some(Path::new("cert.pem")),
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect_err("Expected partial TLS configuration to fail");
+
+        assert!(
+            err.to_string()
+                .contains("TLS requires both certificate and key paths"),
+            "unexpected error: {err}"
+        );
     }
 }

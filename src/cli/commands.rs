@@ -3,8 +3,8 @@ use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyz
 use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, HistoryPruneArgs, InspectArgs, InteractiveArgs, OptimizeArgs,
-    OutputFormat, ProfileArgs, RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs,
-    SymbolicArgs, SymbolicProfile, TuiArgs, UpgradeCheckArgs, Verbosity,
+    OutputFormat, ProfileArgs, RemoteAction, RemoteArgs, ReplArgs, ReplayArgs, RunArgs,
+    ScenarioArgs, ServerArgs, SymbolicArgs, SymbolicProfile, TuiArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
@@ -515,10 +515,13 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     // Start debug server if requested
     if args.server {
         return server(ServerArgs {
+            host: args.host,
             port: args.port,
             token: args.token,
             tls_cert: args.tls_cert,
             tls_key: args.tls_key,
+            repeat: args.repeat,
+            storage_filter: Vec::new(),
         });
     }
 
@@ -530,6 +533,9 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
                 token: args.token.clone(),
                 contract: args.contract.clone(),
                 function: args.function.clone(),
+                tls_cert: args.tls_cert.clone(),
+                tls_key: args.tls_key.clone(),
+                tls_ca: None, // RunArgs doesn't have tls_ca, but RemoteArgs does
                 args: args.args.clone(),
                 tls_cert: args.tls_cert.clone(),
                 tls_key: args.tls_key.clone(),
@@ -664,10 +670,6 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, args.breakpoint.clone());
 
-    // Execute locally with debugging
-    // if !args.is_json_output() {
-    //     println!("\n--- Execution Start ---\n");
-    // }
     if args.instruction_debug {
         print_info("Enabling instruction-level debugging...");
         engine.enable_instruction_debug(&wasm_bytes)?;
@@ -932,32 +934,15 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             result_obj["ledger_entries"] = ledger.to_json();
         }
 
-        let output = serde_json::json!({
-            "schema_version": "1.0",
-            "command": "run",
-            "status": "success",
-            "result": result_obj,
-            "sha256": wasm_hash,
-            "budget": {
-                "cpu_instructions": budget.cpu_instructions,
-                "memory_bytes": budget.memory_bytes,
-            },
-            "storage_diff": storage_diff,
-            "error": serde_json::Value::Null
-        });
+        let output = crate::output::VersionedOutput::success("run", result_obj);
 
         match serde_json::to_string_pretty(&output) {
             Ok(json) => println!("{}", json),
             Err(e) => {
-                let err_output = serde_json::json!({
-                    "schema_version": "1.0",
-                    "command": "run",
-                    "status": "error",
-                    "result": serde_json::Value::Null,
-                    "error": {
-                        "message": format!("Failed to serialize output: {}", e)
-                    }
-                });
+                let err_output = crate::output::VersionedOutput::<serde_json::Value>::error(
+                    "run",
+                    format!("Failed to serialize output: {}", e),
+                );
                 if let Ok(err_json) = serde_json::to_string_pretty(&err_output) {
                     println!("{}", err_json);
                 }
@@ -1822,8 +1807,8 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 /// Start debug server for remote connections
 pub fn server(args: ServerArgs) -> Result<()> {
     print_info(format!(
-        "Starting remote debug server on port {}",
-        args.port
+        "Starting remote debug server on {}:{}",
+        args.host, args.port
     ));
     if let Some(token) = &args.token {
         print_info("Token authentication enabled");
@@ -1846,6 +1831,7 @@ pub fn server(args: ServerArgs) -> Result<()> {
     }
 
     let server = crate::server::DebugServer::new(
+        args.host.clone(),
         args.token.clone(),
         args.tls_cert.as_deref(),
         args.tls_key.as_deref(),
@@ -1874,6 +1860,39 @@ pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
         print_info(format!("Loading contract: {:?}", contract));
         let size = client.load_contract(&contract.to_string_lossy())?;
         print_success(format!("Contract loaded: {} bytes", size));
+    }
+
+    if let Some(action) = &args.action {
+        return match action {
+            RemoteAction::Inspect => {
+                let (function, step_count, paused, call_stack) = client.inspect()?;
+                println!("Function: {}", function.as_deref().unwrap_or("<none>"));
+                println!("Step count: {}", step_count);
+                println!("Paused: {}", paused);
+                if !call_stack.is_empty() {
+                    println!("Call stack:");
+                    for frame in &call_stack {
+                        println!("  {}", frame);
+                    }
+                }
+                Ok(())
+            }
+            RemoteAction::Storage => {
+                let storage_json = client.get_storage()?;
+                println!("{}", storage_json);
+                Ok(())
+            }
+            RemoteAction::Evaluate(eval_args) => {
+                let (result, result_type) =
+                    client.evaluate(&eval_args.expression, eval_args.frame_id)?;
+                if let Some(rtype) = &result_type {
+                    println!("[{}] {}", rtype, result);
+                } else {
+                    println!("{}", result);
+                }
+                Ok(())
+            }
+        };
     }
 
     if let Some(function) = &args.function {
@@ -2298,6 +2317,7 @@ pub async fn repl(args: ReplArgs) -> Result<()> {
         contract_path: args.contract,
         network_snapshot: args.network_snapshot,
         storage: args.storage,
+        watch_keys: args.watch_keys,
     })
     .await
 }

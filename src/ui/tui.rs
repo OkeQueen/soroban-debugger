@@ -132,7 +132,22 @@ impl DebuggerUI {
                 } else {
                     let function = parts[1].to_string();
                     let args = if parts.len() > 2 {
-                        Some(parts[2..].join(" "))
+                        // Extract raw arguments from the original command string
+                        // to preserve internal whitespace and quotes.
+                        let mut current_pos = 0;
+                        // Skip "run" and function name tokens in the original string.
+                        let tokens = [parts[0], parts[1]];
+                        for token in tokens {
+                            if let Some(pos) = command[current_pos..].find(token) {
+                                current_pos += pos + token.len();
+                            }
+                        }
+                        let raw_args = command[current_pos..].trim();
+                        if raw_args.is_empty() {
+                            None
+                        } else {
+                            Some(raw_args.to_string())
+                        }
                     } else {
                         None
                     };
@@ -144,7 +159,9 @@ impl DebuggerUI {
             }
             "stack" => {
                 if let Ok(state) = self.engine.state().lock() {
-                    state.call_stack().display();
+                    crate::inspector::CallStackInspector::display_frames(
+                        state.call_stack().get_stack(),
+                    );
                 }
             }
             "budget" => {
@@ -230,7 +247,9 @@ impl DebuggerUI {
                 );
             }
             crate::logging::log_display("", crate::logging::LogLevel::Info);
-            state.call_stack().display();
+            crate::inspector::CallStackInspector::display_frames(
+                state.call_stack().get_stack(),
+            );
         } else {
             crate::logging::log_display("State unavailable", crate::logging::LogLevel::Info);
         }

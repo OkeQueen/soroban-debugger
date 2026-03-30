@@ -262,6 +262,10 @@ pub struct RunArgs {
     #[arg(short, long, default_value = "9229")]
     pub port: u16,
 
+    /// Host/interface to bind when using --server
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Connect to a remote debugger (address:port)
     #[arg(long)]
     pub remote: Option<String>,
@@ -523,6 +527,13 @@ pub struct ReplArgs {
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
+
+    /// Filter storage output by key pattern (repeatable). Supports:
+    ///   prefix*       — match keys starting with prefix
+    ///   re:<regex>    — match keys by regex
+    ///   exact_key     — match key exactly
+    #[arg(long, value_name = "PATTERN")]
+    pub watch_keys: Vec<String>,
 }
 
 impl ReplArgs {
@@ -1032,6 +1043,10 @@ pub struct ReplayArgs {
 
 #[derive(Parser)]
 pub struct ServerArgs {
+    /// Host/interface to bind
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value = "9229")]
     pub port: u16,
@@ -1091,17 +1106,32 @@ pub struct RemoteArgs {
     #[arg(short, long)]
     pub args: Option<String>,
 
-    /// Default request timeout in milliseconds (default: 30000)
-    #[arg(long, value_name = "MS", default_value = "30000")]
-    pub timeout_ms: u64,
+    /// Remote operation to perform (default: execute or ping)
+    #[command(subcommand)]
+    pub action: Option<RemoteAction>,
+}
 
-    /// Maximum number of retry attempts for failed requests (default: 3)
-    #[arg(long, value_name = "N", default_value = "3")]
-    pub max_retries: usize,
+#[derive(Subcommand)]
+pub enum RemoteAction {
+    /// Inspect current execution state (function, step count, call stack)
+    Inspect,
 
-    /// Base delay between retries in milliseconds (default: 200)
-    #[arg(long, value_name = "MS", default_value = "200")]
-    pub retry_delay_ms: u64,
+    /// Get contract storage state as JSON
+    Storage,
+
+    /// Evaluate an expression in the current debug context
+    Evaluate(RemoteEvaluateArgs),
+}
+
+#[derive(Parser)]
+pub struct RemoteEvaluateArgs {
+    /// Expression to evaluate
+    #[arg(short, long)]
+    pub expression: String,
+
+    /// Stack frame ID for evaluation context (optional)
+    #[arg(long)]
+    pub frame_id: Option<u64>,
 }
 
 #[derive(Parser)]
