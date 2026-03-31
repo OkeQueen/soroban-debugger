@@ -634,4 +634,5 @@ impl DebuggerEngine {
 }
 
 #[cfg(test)]
+#[path = "engine_test.rs"]
 mod engine_test;

@@ -1263,7 +1263,7 @@ mod tests {
 
         let exported_functions = HashSet::from([String::from("entrypoint")]);
         let resolved =
-            sm.resolve_source_breakpoints(&wasm, &source_path, &[7], &exported_functions);
+            sm.resolve_source_breakpoints(&wasm, &source_path, &[7], &exported_functions, None);
 
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].requested_line, 7);
