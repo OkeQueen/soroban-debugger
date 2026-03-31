@@ -36,6 +36,7 @@ export interface DebuggerProcessConfig {
   spawnServer?: boolean;
   storageFilter?: string[];
   repeat?: number;
+  dryRun?: boolean;
   /**
    * Path to a TLS certificate file for secure server connections.
    */
@@ -119,7 +120,9 @@ export interface LaunchPreflightIssue {
     | "port"
     | "host"
     | "token"
-    | "batchArgs";
+    | "batchArgs"
+    | "tlsCert"
+    | "tlsKey";
   message: string;
   expected: string;
   quickFixes: LaunchPreflightQuickFix[];
@@ -1364,7 +1367,7 @@ export async function validateLaunchConfig(
 
 function pushFileIssue(
   issues: LaunchPreflightIssue[],
-  field: "binaryPath" | "contractPath" | "snapshotPath",
+  field: "binaryPath" | "contractPath" | "snapshotPath" | "tlsCert" | "tlsKey",
   filePath: string | undefined,
   expected: string,
   quickFixes: LaunchPreflightQuickFix[],
