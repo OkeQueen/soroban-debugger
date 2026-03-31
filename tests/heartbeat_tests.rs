@@ -50,8 +50,7 @@ fn connect_with_retry(port: u16) -> Result<TcpStream, std::io::Error> {
             }
         }
     }
-    Err(last_err
-        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect")))
+    Err(last_err.unwrap_or_else(|| std::io::Error::other("Failed to connect")))
 }
 
 #[test]
@@ -65,9 +64,7 @@ fn test_heartbeat_negotiation() {
         let mut stream = connect_with_retry(port)?;
 
         // 1. Handshake with heartbeat/timeout request
-        let handshake = format!(
-            "{{\"id\":1,\"request\":{{\"type\":\"Handshake\",\"client_name\":\"test\",\"client_version\":\"1.0\",\"protocol_min\":1,\"protocol_max\":1,\"heartbeat_interval_ms\":100,\"idle_timeout_ms\":500}}}}\n"
-        );
+        let handshake = "{\"id\":1,\"request\":{\"type\":\"Handshake\",\"client_name\":\"test\",\"client_version\":\"1.0\",\"protocol_min\":1,\"protocol_max\":1,\"heartbeat_interval_ms\":100,\"idle_timeout_ms\":500}}\n".to_string();
         stream.write_all(handshake.as_bytes())?;
 
         let mut reader = BufReader::new(stream);
@@ -101,9 +98,7 @@ fn test_server_sends_heartbeats() {
         let mut stream = connect_with_retry(port)?;
 
         // 1. Handshake with short heartbeat interval
-        let handshake = format!(
-            "{{\"id\":1,\"request\":{{\"type\":\"Handshake\",\"client_name\":\"test\",\"client_version\":\"1.0\",\"protocol_min\":1,\"protocol_max\":1,\"heartbeat_interval_ms\":200}}}}\n"
-        );
+        let handshake = "{\"id\":1,\"request\":{\"type\":\"Handshake\",\"client_name\":\"test\",\"client_version\":\"1.0\",\"protocol_min\":1,\"protocol_max\":1,\"heartbeat_interval_ms\":200}}\n".to_string();
         stream.write_all(handshake.as_bytes())?;
 
         let mut reader = BufReader::new(stream);
@@ -151,9 +146,7 @@ fn test_idle_timeout_disconnects_client() {
         let mut stream = connect_with_retry(port)?;
 
         // 1. Handshake with short idle timeout
-        let handshake = format!(
-            "{{\"id\":1,\"request\":{{\"type\":\"Handshake\",\"client_name\":\"test\",\"client_version\":\"1.0\",\"protocol_min\":1,\"protocol_max\":1,\"idle_timeout_ms\":300}}}}\n"
-        );
+        let handshake = "{\"id\":1,\"request\":{\"type\":\"Handshake\",\"client_name\":\"test\",\"client_version\":\"1.0\",\"protocol_min\":1,\"protocol_max\":1,\"idle_timeout_ms\":300}}\n".to_string();
         stream.write_all(handshake.as_bytes())?;
 
         let mut reader = BufReader::new(stream);
