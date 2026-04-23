@@ -70,7 +70,8 @@ pub fn invoke_function(
 
     // Convert Val → ScVal for the execution record.
     // TryFromVal is used here via ScVal::try_from_val.
-    let sc_args: Vec<ScVal> = args.args
+    let sc_args: Vec<ScVal> = args
+        .args
         .iter()
         .map(|v| ScVal::try_from_val(env.host(), v))
         .collect::<std::result::Result<Vec<_>, _>>()
