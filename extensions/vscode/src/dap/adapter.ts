@@ -437,6 +437,17 @@ export class SorobanDebugSession extends DebugSession {
       expensive: false
     });
 
+    const localsKeys = this.state.locals ? Object.keys(this.state.locals) : [];
+    if (localsKeys.length > 0) {
+      const localsRef = this.variableStore.createListHandle(this.variableStore.variablesFromLocals(this.state.locals as Record<string, unknown>));
+
+      scopes.push({
+        name: 'Locals',
+        variablesReference: localsRef,
+        expensive: false
+      });
+    }
+
     const storageKeys = this.state.storage ? Object.keys(this.state.storage) : [];
     if (storageKeys.length > 0) {
       const variablesRef = this.variableStore.createListHandle(this.variableStore.variablesFromStorage(this.state.storage as Record<string, unknown>));
