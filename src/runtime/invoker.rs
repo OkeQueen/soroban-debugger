@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use tracing::info;
 
 /// Invoke `function` on the already-registered contract at `contract_address`.
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(function = function))]
 pub fn invoke_function(
     env: &Env,
