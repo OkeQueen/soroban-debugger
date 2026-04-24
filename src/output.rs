@@ -113,6 +113,34 @@ impl PluginIncidentReport {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginDependencyFailureReason {
+    CycleDetected,
+    VersionMismatch { expected: String, found: String },
+    NotFound,
+    LoadError(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginDependencyNode {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub dependencies: Vec<String>,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<PluginDependencyFailureReason>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PluginDependencyReport {
+    pub root_plugin: String,
+    pub load_order: Vec<String>,
+    pub nodes: Vec<PluginDependencyNode>,
+    pub success: bool,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionedOutput<T>
 where
